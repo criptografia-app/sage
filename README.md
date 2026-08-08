@@ -153,12 +153,24 @@ Configured in `sage-config.json` under `"policy"`. Hot-reloaded on every evaluat
 
 ## Architecture
 
+SAGE is the **brain** on top of [`mcp-safe`](https://github.com/dennisonbertram/mcp-safe),
+which handles the raw Safe SDK operations (the **body**).
+
+```
+[mcp-safe]  ← Safe ops: get_info, get_balance, propose, execute, add_owner…
+     +
+[SAGE]      ← Policy engine, agent keys, daemon, P2P desk integration, AML/KYC context
+```
+
+Install both: `mcp-safe` for admin/query operations in Claude Desktop,
+SAGE as a daemon for autonomous agent signing.
+
 ```
 sage/
-├── sage.js           MCP server + CLI entry point
+├── sage.js           MCP server + CLI entry point + daemon
 ├── safeClient.js     Safe Transaction Service wrapper (perception + action)
 ├── agentKey.js       Encrypted agent key management (AES-256-GCM + scrypt)
-├── policyEngine.js   Signing policy engine
+├── policyEngine.js   Signing policy engine (AUTO_SIGN / HOLD_HUMAN / REJECT)
 ├── sage-config.json  Chain, Safe address, policy rules
 ├── Dockerfile
 ├── docker-compose.yml
