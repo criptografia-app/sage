@@ -1,0 +1,67 @@
+services:
+
+  # ── SAGE — Agentic Wallet daemon ────────────────────────────────────────────
+  sage:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: criptografia-sage
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # Safe contract address on the target chain
+      SAGE_SAFE_ADDRESS:             ${SAGE_SAFE_ADDRESS}
+      # Agent key passphrases — never commit these
+      SAGE_PASSPHRASE_COMPLIANCE:    ${SAGE_PASSPHRASE_COMPLIANCE}
+      SAGE_PASSPHRASE_EXECUTION:     ${SAGE_PASSPHRASE_EXECUTION}
+      # RPC endpoints (override if using a private node)
+      POLYGON_RPC:                   ${POLYGON_RPC:-https://polygon-rpc.com}
+      BASE_RPC:                      ${BASE_RPC:-https://mainnet.base.org}
+      ETH_RPC:                       ${ETH_RPC:-https://eth.llamarpc.com}
+      # Notification bridges (optional — for HOLD_HUMAN alerts)
+      WHATSAPP_BRIDGE_URL:           ${WHATSAPP_BRIDGE_URL:-http://criptografia-p2p:3001/api/bot/send}
+      WHATSAPP_BRIDGE_SECRET:        ${WHATSAPP_BRIDGE_SECRET:-}
+      NOTIFY_PHONE:                  ${NOTIFY_PHONE:-+5548991703924}
+    volumes:
+      # Encrypted agent keys — mounted from host, never inside the image
+      - ${SAGE_KEYS_DIR:-./keys}:/app/keys:ro
+      # Audit log — persisted across restarts
+      - sage_audit:/app/data
+    networks:
+      - criptografia_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # Only start after the P2P desk is healthy (optional integration)
+    # depends_on:
+    #   criptografia-p2p:
+    #     condition: service_healthy
+
+  # ── SAGE MCP proxy — exposes MCP over HTTP for remote clients ───────────────
+  # Uncomment if you want to connect Claude Desktop to a remote SAGE instance
+  # sage-mcp-proxy:
+  #   image: node:20-alpine
+  #   command: npx -y @modelcontextprotocol/server-proxy --port 4000 -- node /app/sage.js
+  #   container_name: criptografia-sage-mcp
+  #   environment:
+  #     SAGE_SAFE_ADDRESS:          ${SAGE_SAFE_ADDRESS}
+  #     SAGE_PASSPHRASE_EXECUTION:  ${SAGE_PASSPHRASE_EXECUTION}
+  #     SAGE_PASSPHRASE_COMPLIANCE: ${SAGE_PASSPHRASE_COMPLIANCE}
+  #   volumes:
+  #     - .:/app:ro
+  #     - ${SAGE_KEYS_DIR:-./keys}:/app/keys:ro
+  #   ports:
+  #     - "4000:4000"
+  #   networks:
+  #     - criptografia_net
+
+networks:
+  criptografia_net:
+    # Attach to the existing CRIPTOGRAFIA network if running alongside the P2P stack
+    external: true
+    name: p2p_criptografia-net
+
+volumes:
+  sage_audit:
