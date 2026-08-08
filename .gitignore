@@ -1,0 +1,5 @@
+node_modules/
+.sage-key-*.enc
+sage-audit.log
+.env
+*.env

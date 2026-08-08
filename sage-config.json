@@ -1,0 +1,34 @@
+{
+  "chain": "polygon",
+  "safe_address": "",
+  "agents": {
+    "compliance": {
+      "role": "Evaluates KYC/AML before signing. Rejects flagged transactions.",
+      "key_file": ".sage-key-compliance.enc"
+    },
+    "execution": {
+      "role": "Co-signs approved transactions within policy limits.",
+      "key_file": ".sage-key-execution.enc"
+    }
+  },
+  "policy": {
+    "auto_sign": {
+      "max_value_usd": 3000,
+      "allowed_tokens": ["USDT", "USDC", "ETH", "BNB"],
+      "requires_kyc": true,
+      "requires_aml_clear": true,
+      "allowed_hours": { "start": 9, "end": 18 },
+      "allowed_days": [1, 2, 3, 4, 5]
+    },
+    "always_human": {
+      "above_usd": 10000,
+      "new_address": true,
+      "aml_flagged": true,
+      "outside_hours": true
+    }
+  },
+  "mcp": {
+    "server_name": "sage",
+    "description": "SAGE Agentic Wallet — Safe multisig with AI co-signers"
+  }
+}
