@@ -1,6 +1,6 @@
 {
   "chain": "polygon",
-  "safe_address": "",
+  "safe_address": "0xe601D7B4103FD508dA521A25D7639F085448196d",
   "agents": {
     "compliance": {
       "role": "Evaluates KYC/AML before signing. Rejects flagged transactions.",
