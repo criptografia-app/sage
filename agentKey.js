@@ -9,14 +9,14 @@
  */
 import { ethers } from 'ethers';
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
 // ── Encryption (same scrypt params as P2P .wallet_key) ─────────────────────
-const SCRYPT_N = 32768, SCRYPT_R = 8, SCRYPT_P = 1, KEY_LEN = 32;
+const SCRYPT_N = 16384, SCRYPT_R = 8, SCRYPT_P = 1, KEY_LEN = 32;
 
 function deriveKey(passphrase, salt) {
   return scryptSync(passphrase, salt, KEY_LEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
@@ -93,7 +93,6 @@ export function loadAgentSigner(agentName, passphrase, provider = null) {
  * Return all agent addresses registered on disk (no decryption needed).
  */
 export function listAgentAddresses() {
-  const { readdirSync } = await import('fs');
   return readdirSync(__dir)
     .filter(f => f.startsWith('.sage-key-') && f.endsWith('.enc'))
     .map(f => {
