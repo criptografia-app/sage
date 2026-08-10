@@ -41,6 +41,34 @@ function auditLog(entry) {
   if (process.env.NODE_ENV !== 'test') console.error('[SAGE AUDIT]', line);
 }
 
+// ── Trusted policy context ────────────────────────────────────────────────────
+/**
+ * Build the policy context from the REAL pending tx, never from caller args.
+ *
+ * KYC/AML status and a USD valuation are not available inside this repo yet —
+ * wiring them from P2P's compliance.js (and a price oracle) is a separate,
+ * design-gated follow-up. Until then we default the compliance flags to the
+ * un-verified (safe) side, so the policy engine holds every tx for a human
+ * co-signature rather than auto-signing on facts we cannot verify.
+ *
+ * @param {object} details - output of SAGEClient.getTransactionDetails()
+ */
+function deriveTrustedContext(details) {
+  return {
+    // Real, tx-derived facts (from the Transaction Service / calldata):
+    to:              details.to,
+    value_wei:       details.value,
+    token_address:   details.erc20?.token_address ?? null,
+    transfer_amount: details.erc20?.transfer_amount ?? null,
+    // Compliance facts we cannot verify in-scope. NOT caller-supplied.
+    // Default to the side that forces HOLD_HUMAN until compliance.js is wired.
+    kyc_verified:    false,
+    aml_clear:       false,
+    // value_usd deliberately omitted: no price oracle in-scope, and we must not
+    // synthesise a value that could let a large transfer slip under a limit.
+  };
+}
+
 // ── MCP Server — JSON-RPC over stdio ────────────────────────────────────────
 // SAGE exposes itself as an MCP server so Claude/any MCP client can control it.
 
@@ -64,7 +92,7 @@ const TOOLS = [
       properties: {
         safe_tx_hash: { type: 'string', description: 'The safeTxHash of the pending transaction' },
         agent:        { type: 'string', description: 'Agent name to sign with (default: execution)', default: 'execution' },
-        context:      { type: 'object', description: 'Optional context: { kyc_verified, aml_clear, value_usd, token }' },
+        context:      { type: 'object', description: 'Ignored for signing decisions. Auto-sign gating is derived from the real pending tx, not from caller-supplied context.' },
       },
     },
   },
@@ -143,12 +171,20 @@ async function handleTool(name, args) {
     }
 
     case 'sage_approve': {
-      const { safe_tx_hash, agent = 'execution', context = {} } = args;
+      const { safe_tx_hash, agent = 'execution' } = args;
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
       if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
 
-      // Policy check
-      const { decision, reasons } = evaluate(null, context, agent);
+      // SECURITY: never gate auto-signing on caller-supplied context. Any
+      // kyc_verified / aml_clear / value_usd the caller passes in `args` is
+      // ignored — a caller could claim `value_usd: 10` for a large transfer.
+      // We derive the decision inputs from the real pending tx on the
+      // Transaction Service instead.
+      const details = await client.getTransactionDetails(safe_tx_hash);
+      const context = deriveTrustedContext(details);
+
+      // Policy check against tx-derived facts.
+      const { decision, reasons } = evaluate(details, context, agent);
       auditLog({ action: 'policy_eval', safe_tx_hash, agent, decision, reasons, context });
 
       if (decision === DECISION.REJECT) {

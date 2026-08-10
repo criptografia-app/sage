@@ -75,7 +75,11 @@ export function evaluate(tx, context, agentRole = 'execution') {
     reasons.push('destination address never seen before');
   }
   const now  = new Date();
-  const hour = now.getUTCHours() - 3; // BRT = UTC-3
+  // BRT = UTC-3. The old `getUTCHours() - 3` underflowed to negative values
+  // before 03:00 UTC (e.g. 01:00 UTC → -2), silently breaking the comparison.
+  // The `+ 24) % 24` keeps it in 0–23. (getDay() is still machine-local — a
+  // separate BRT-day seam tracked as an out-of-scope follow-up.)
+  const hour = ((now.getUTCHours() - 3) + 24) % 24;
   const day  = now.getDay();
   const outOfHours = hour < auto.allowed_hours.start || hour >= auto.allowed_hours.end;
   const outOfDays  = !auto.allowed_days.includes(day);

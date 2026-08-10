@@ -6,7 +6,14 @@
  * blockchain state and act on it.
  */
 import SafeApiKit from '@safe-global/api-kit';
+import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
+
+// ERC-20 transfer(address,uint256) — used to decode token transfers out of calldata
+const ERC20_IFACE = new ethers.Interface([
+  'function transfer(address to, uint256 amount)',
+  'function transferFrom(address from, address to, uint256 amount)',
+]);
 
 // ── Chain configs ────────────────────────────────────────────────────────────
 export const CHAINS = {
@@ -94,15 +101,104 @@ export class SAGEClient {
   // ── ACTION — what the wallet does ─────────────────────────────────────────
 
   /**
-   * Sign a pending transaction as an agent.
+   * Initialise @safe-global/protocol-kit for this Safe with an agent signer.
+   * protocol-kit owns the EIP-712 hashing and signature encoding so we never
+   * hand-roll them.
+   * @param {ethers.Wallet} agentWallet
+   * @returns {Promise<Safe>}
+   */
+  async _protocolKit(agentWallet) {
+    if (!this.safeAddress) throw new Error('No Safe address configured');
+    return Safe.init({
+      provider:    this.chain.rpc,
+      signer:      agentWallet.privateKey,
+      safeAddress: this.safeAddress,
+    });
+  }
+
+  /**
+   * Fetch a pending transaction from the Transaction Service and decode the
+   * fields a policy needs. This is the ground truth — callers must never be
+   * trusted to describe a tx they want signed.
+   * @param {string} safeTxHash
+   */
+  async getTransactionDetails(safeTxHash) {
+    if (!this.safeAddress) throw new Error('No Safe address configured');
+    const tx = await this.apiKit.getTransaction(safeTxHash);
+
+    // Decode an ERC-20 transfer out of the calldata where present.
+    let erc20 = null;
+    if (tx.data && tx.data !== '0x') {
+      try {
+        const parsed = ERC20_IFACE.parseTransaction({ data: tx.data });
+        if (parsed && (parsed.name === 'transfer' || parsed.name === 'transferFrom')) {
+          erc20 = {
+            token_address:   ethers.getAddress(tx.to),           // the ERC-20 contract
+            transfer_to:     parsed.args.to,
+            transfer_amount: parsed.args.amount.toString(),      // raw units, no decimals applied
+          };
+        }
+      } catch { /* not an ERC-20 transfer — leave erc20 null */ }
+    }
+
+    return {
+      safeTxHash,
+      to:        tx.to,
+      value:     tx.value,        // native value in wei (string)
+      data:      tx.data,
+      operation: tx.operation,
+      nonce:     tx.nonce,
+      erc20,
+    };
+  }
+
+  /**
+   * Sign (co-sign) a pending transaction as an agent.
+   *
+   * We rebuild the exact pending tx from the Transaction Service and let
+   * protocol-kit produce the EIP-712 SafeTx signature. We refuse to sign if the
+   * hash protocol-kit derives from the rebuilt tx does not match the hash we
+   * were asked to sign — that would mean the tx we're signing isn't the one on
+   * the service.
+   *
    * @param {string}         safeTxHash  - hash of the pending tx
    * @param {ethers.Wallet}  agentWallet - the agent's signer
    */
   async signTransaction(safeTxHash, agentWallet) {
-    // We use the Safe Transaction Service to add a signature
-    // The agent signs the tx hash with its private key
-    const signature = await agentWallet.signMessage(ethers.getBytes(safeTxHash));
+    const protocolKit = await this._protocolKit(agentWallet);
+    const pending     = await this.apiKit.getTransaction(safeTxHash);
+
+    const safeTx = await protocolKit.createTransaction({
+      transactions: [{
+        to:        pending.to,
+        value:     pending.value,
+        data:      pending.data || '0x',
+        operation: pending.operation,
+      }],
+      options: {
+        safeTxGas:      pending.safeTxGas,
+        baseGas:        pending.baseGas,
+        gasPrice:       pending.gasPrice,
+        gasToken:       pending.gasToken,
+        refundReceiver: pending.refundReceiver,
+        nonce:          pending.nonce,
+      },
+    });
+
+    const derivedHash = await protocolKit.getTransactionHash(safeTx);
+    if (derivedHash.toLowerCase() !== safeTxHash.toLowerCase()) {
+      throw new Error(
+        `safeTxHash mismatch — service says ${safeTxHash}, protocol-kit derives ${derivedHash}; refusing to sign`,
+      );
+    }
+
+    const signedTx  = await protocolKit.signTransaction(safeTx);
+    // Only the agent has signed here, so encodedSignatures() is exactly its
+    // EIP-712 SafeTx signature (correctly-encoded v), which is what the
+    // Transaction Service expects for a confirmation.
+    const signature = signedTx.encodedSignatures();
     await this.apiKit.confirmTransaction(safeTxHash, signature);
+
     return { signed: true, safeTxHash, signer: agentWallet.address };
   }
 
@@ -112,41 +208,26 @@ export class SAGEClient {
    * @param {ethers.Wallet}  agentWallet - the proposing agent
    */
   async proposeTransaction(tx, agentWallet) {
-    const safeInfo = await this.getSafeInfo();
-    const nonce    = safeInfo.nonce;
+    const protocolKit = await this._protocolKit(agentWallet);
 
-    // Build the Safe transaction object
-    const safeTx = {
-      to:             tx.to,
-      value:          tx.value || '0',
-      data:           tx.data  || '0x',
-      operation:      0,   // CALL
-      safeTxGas:      0,
-      baseGas:        0,
-      gasPrice:       0,
-      gasToken:       ethers.ZeroAddress,
-      refundReceiver: ethers.ZeroAddress,
-      nonce,
-    };
+    const safeTx = await protocolKit.createTransaction({
+      transactions: [{
+        to:        tx.to,
+        value:     tx.value || '0',
+        data:      tx.data  || '0x',
+        operation: 0,   // CALL
+      }],
+    });
 
-    // Compute the Safe tx hash
-    const safeTxHash = ethers.keccak256(
-      ethers.AbiCoder.defaultAbiCoder().encode(
-        ['address','uint256','bytes','uint8','uint256','uint256','uint256','address','address','uint256'],
-        [safeTx.to, safeTx.value, safeTx.data, safeTx.operation,
-         safeTx.safeTxGas, safeTx.baseGas, safeTx.gasPrice,
-         safeTx.gasToken, safeTx.refundReceiver, safeTx.nonce]
-      )
-    );
-
-    const signature = await agentWallet.signMessage(ethers.getBytes(safeTxHash));
+    const safeTxHash = await protocolKit.getTransactionHash(safeTx);
+    const signedTx   = await protocolKit.signTransaction(safeTx);
 
     await this.apiKit.proposeTransaction({
-      safeAddress:      this.safeAddress,
-      safeTransactionData: safeTx,
+      safeAddress:         this.safeAddress,
+      safeTransactionData: signedTx.data,
       safeTxHash,
-      senderAddress:    agentWallet.address,
-      senderSignature:  signature,
+      senderAddress:       agentWallet.address,
+      senderSignature:     signedTx.encodedSignatures(),
     });
 
     return { proposed: true, safeTxHash };
