@@ -1,5 +1,6 @@
 node_modules/
 .sage-key-*.enc
+.sage-passphrases.txt
 sage-audit.log
 .env
 *.env
