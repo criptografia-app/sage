@@ -44,7 +44,7 @@ import SafeNS                        from '@safe-global/protocol-kit';
 import { createCipheriv, randomBytes, scryptSync } from 'crypto';
 import { writeFileSync, existsSync } from 'fs';
 import { join, dirname }             from 'path';
-import { fileURLToPath }             from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import readline                      from 'readline';
 import { loadAgentSigner }           from './agentKey.js';
 
@@ -133,7 +133,11 @@ function revertReason(e) {
   return e?.shortMessage || e?.message?.split('\n')[0] || 'unknown revert';
 }
 
-/** Simulate one SafeTransaction through execTransaction. Never sends anything. */
+/**
+ * Simulate one SafeTransaction through execTransaction. Never sends anything.
+ * Also measures the gas it would cost, so the preflight can price the real
+ * requirement instead of guessing.
+ */
 async function simulate(provider, safeTx, owner) {
   const d = safeTx.data;
   const data = EXEC_ABI.encodeFunctionData('execTransaction', [
@@ -141,11 +145,70 @@ async function simulate(provider, safeTx, owner) {
     d.safeTxGas, d.baseGas, d.gasPrice, d.gasToken, d.refundReceiver,
     preValidatedSig(owner),
   ]);
+  const tx = { to: SAFE, from: owner, data };
   try {
-    await provider.call({ to: SAFE, from: owner, data });
-    return { ok: true };
+    await provider.call(tx);
   } catch (e) {
     return { ok: false, reason: revertReason(e) };
+  }
+  let gas = null;
+  try { gas = await provider.estimateGas(tx); } catch { /* priced with the fallback */ }
+  return { ok: true, gas };
+}
+
+// Used for steps that cannot be estimated yet because they only become valid
+// after an earlier step lands. Deliberately generous — under-quoting here is
+// what produces a half-finished run.
+export const FALLBACK_STEP_GAS = 120_000n;
+
+/**
+ * Can this account actually pay for the plan?
+ *
+ * Checking `balance > 0` is not an answer: it attests "non-zero", not "enough".
+ * Price the real thing — live fee data x measured gas x step count, plus a
+ * margin, because Polygon's base fee moves enough that any fixed threshold is
+ * wrong within the hour.
+ *
+ * Running out PARTWAY is the worst outcome: adding one owner and then failing
+ * to afford `changeThreshold` leaves the Safe in an intermediate state.
+ */
+export const GAS_MARGIN_PCT = 125n;   // +25%
+
+/** Pure pricing half, so the arithmetic can be tested without a chain. */
+export function priceGasPlan({ unitCost, gasPerStep, balance, marginPct = GAS_MARGIN_PCT }) {
+  const totalGas = gasPerStep.reduce((a, g) => a + (g.gas ?? FALLBACK_STEP_GAS), 0n);
+  const required = (unitCost * totalGas * marginPct) / 100n;
+  return {
+    ok: balance >= required,
+    balance, required, unitCost, totalGas,
+    shortfall: balance >= required ? 0n : required - balance,
+    estimated: gasPerStep.filter(g => g.gas != null).length,
+    total:     gasPerStep.length,
+  };
+}
+
+async function gasPreflight(provider, submitter, gasPerStep) {
+  const fee = await provider.getFeeData();
+  return priceGasPlan({
+    unitCost:   fee.maxFeePerGas ?? fee.gasPrice ?? 0n,
+    gasPerStep,
+    balance:    await provider.getBalance(submitter),
+  });
+}
+
+function reportGasPreflight(p) {
+  console.log('\n  Gas preflight (the Safe\'s balance is irrelevant — the submitter pays):');
+  console.log(`    fee/gas    ${ethers.formatUnits(p.unitCost, 'gwei')} gwei (live)`);
+  console.log(`    total gas  ${p.totalGas} across ${p.total} step(s)` +
+              (p.estimated < p.total ? ` (${p.total - p.estimated} estimated at ${FALLBACK_STEP_GAS} — not yet simulatable)` : ''));
+  console.log(`    required   ${ethers.formatEther(p.required)} native (incl. 25% margin)`);
+  console.log(`    balance    ${ethers.formatEther(p.balance)} native`);
+  if (p.ok) {
+    console.log('    ✓ sufficient');
+  } else {
+    console.log(`    ✗ SHORT BY ${ethers.formatEther(p.shortfall)} native — fund the submitter before running.`);
+    console.log('      Do not start: running out partway leaves the Safe half-configured');
+    console.log('      (e.g. an owner added but the threshold never raised).');
   }
 }
 
@@ -319,6 +382,7 @@ async function main() {
   if (DRY_RUN) {
     console.log('Step 3/4  Simulating each transaction (eth_call, no state change)\n');
     let failures = 0;
+    const gasPerStep = [];
 
     for (const step of plan) {
       // A step whose precondition isn't met yet may fail at BUILD time
@@ -337,6 +401,7 @@ async function main() {
         if (blockedUntilEarlierStepsLand) {
           console.log(`  ~ ${step.label}`);
           console.log(`      not yet valid (${why}) — needs ${step.needsOwners} owners, Safe has ${owners0.length}; becomes valid once the ${toAdd.length} add(s) above land.`);
+          gasPerStep.push({ gas: null });   // still has to be paid for
         } else {
           console.log(`  ✗ ${step.label}`);
           console.log(`      CANNOT BUILD: ${why}`);
@@ -347,8 +412,10 @@ async function main() {
 
       const res = await simulate(provider, safeTx, ownerAddress);
       if (res.ok) {
-        console.log(`  ✓ ${step.label}`);
+        gasPerStep.push({ gas: res.gas ?? null });
+        console.log(`  ✓ ${step.label}${res.gas ? `  (${res.gas} gas)` : ''}`);
       } else if (blockedUntilEarlierStepsLand) {
+        gasPerStep.push({ gas: null });
         console.log(`  ~ ${step.label}`);
         console.log(`      reverts now (${res.reason}) — needs ${step.needsOwners} owners, Safe has ${owners0.length}; valid once the add(s) above land.`);
       } else {
@@ -361,25 +428,10 @@ async function main() {
     console.log('\n  Note: each step is simulated independently against CURRENT chain');
     console.log('  state, so steps that depend on an earlier step landing are marked ~.');
 
-    // Gas preflight. The Safe holds the funds, but whoever SUBMITS
-    // execTransaction pays gas from their own EOA — so an owner with a
-    // well-funded Safe and an empty wallet still cannot execute anything. This
-    // is undocumented and normally surfaces as an opaque gas-estimation error
-    // at the worst possible moment, so fail loudly here instead.
-    const bal = await provider.getBalance(ownerAddress);
-    console.log('\n  Gas preflight (the Safe\'s balance is irrelevant here):');
-    console.log(`    submitter ${ownerAddress}`);
-    console.log(`    balance   ${ethers.formatEther(bal)} native`);
-    if (bal === 0n) {
-      console.log('    ✗ EMPTY — this address pays the gas for every step above and');
-      console.log('      cannot submit anything. Fund it before a real run.');
-      failures++;
-    } else {
-      console.log('    ✓ funded');
-    }
+    const pf = await gasPreflight(provider, ownerAddress, gasPerStep);
+    reportGasPreflight(pf);
+    if (!pf.ok) failures++;
 
-    // Demonstrate the original defect in the same environment, so the next
-    // person can see the difference rather than take it on trust.
     console.log('\nStep 4/4  Control: the ORIGINAL direct-EOA call path');
     const legacy = new ethers.Interface(['function addOwnerWithThreshold(address owner,uint256 _threshold)']);
     try {
@@ -399,6 +451,19 @@ async function main() {
   }
 
   console.log('Step 3/4  Executing\n');
+
+  // Same preflight as --dry-run. Checking only in the dry run would be its own
+  // green-signal bug: the safety check has to guard the path that spends money.
+  // Priced conservatively here, since steps that aren't valid yet can't be
+  // measured until earlier ones land.
+  const livePf = await gasPreflight(provider, ownerAddress, plan.map(() => ({ gas: null })));
+  reportGasPreflight(livePf);
+  if (!livePf.ok) {
+    console.error('\n  ✗ Aborting before the first transaction — see shortfall above.');
+    process.exit(1);
+  }
+  console.log('');
+
   for (const step of plan) {
     console.log(`  ${step.label}`);
     const safeTx = await step.build();
@@ -444,4 +509,8 @@ async function main() {
   console.log('  3. node sage.js info      ← verify Safe state via API\n');
 }
 
-main().catch(e => { console.error('\n✗ Setup failed:', e.message); process.exit(1); });
+// Only run the wizard when executed directly — importing this module (e.g. from a
+// test) must not start it. FALLBACK_STEP_GAS is exported for the same reason.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(e => { console.error('\n✗ Setup failed:', e.message); process.exit(1); });
+}
