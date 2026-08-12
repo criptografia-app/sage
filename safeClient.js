@@ -5,9 +5,21 @@
  * This is the "body" of the agentic wallet — it can perceive
  * blockchain state and act on it.
  */
-import SafeApiKit from '@safe-global/api-kit';
-import Safe from '@safe-global/protocol-kit';
+import SafeApiKitNS from '@safe-global/api-kit';
+import SafeNS from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
+
+// Both Safe SDKs ship CommonJS with no `exports` map, so under Node ESM the
+// default import resolves to the module NAMESPACE OBJECT, not the class —
+// `SafeNS.init` is undefined while `SafeNS.default.init` is the real function.
+// Reach through `.default` when it's there; the `??` keeps this working if
+// either package later ships a genuine ESM default export.
+//
+// Applied to BOTH deliberately: package.json pins caret ranges (^5.0.0 / ^2.5.0),
+// so a minor bump could flip either package's shape silently, and an asymmetric
+// guard would then break the mirror way.
+const SafeApiKit = SafeApiKitNS?.default ?? SafeApiKitNS;
+const Safe       = SafeNS?.default       ?? SafeNS;
 
 // ERC-20 transfer(address,uint256) — used to decode token transfers out of calldata
 const ERC20_IFACE = new ethers.Interface([
@@ -52,7 +64,7 @@ export class SAGEClient {
     this.chain       = CHAINS[chainKey] || CHAINS.polygon;
     this.safeAddress = safeAddress;
     this.provider    = new ethers.JsonRpcProvider(this.chain.rpc);
-    this.apiKit      = new SafeApiKit.default({ chainId: this.chain.chainId });
+    this.apiKit      = new SafeApiKit({ chainId: this.chain.chainId });
   }
 
   // ── PERCEPTION — what the wallet sees ────────────────────────────────────
@@ -109,6 +121,7 @@ export class SAGEClient {
    */
   async _protocolKit(agentWallet) {
     if (!this.safeAddress) throw new Error('No Safe address configured');
+    // `Safe` here is the interop-resolved class — see the note at the imports.
     return Safe.init({
       provider:    this.chain.rpc,
       signer:      agentWallet.privateKey,
