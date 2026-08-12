@@ -49,7 +49,10 @@ export const CHAINS = {
   },
   sepolia: {
     chainId:    11155111n,
-    rpc:        process.env.SEPOLIA_RPC || 'https://rpc.sepolia.org',
+    // NB: the long-standing default `https://rpc.sepolia.org` is dead (returns a
+    // Cloudflare 522 / an HTML error page to JSON-RPC POSTs, not a rate limit).
+    // publicnode is keyless and live; SEPOLIA_RPC still overrides.
+    rpc:        process.env.SEPOLIA_RPC || 'https://ethereum-sepolia-rpc.publicnode.com',
     txService:  'https://safe-transaction-sepolia.safe.global',
     name:       'Sepolia (testnet)',
   },
