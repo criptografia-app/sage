@@ -87,11 +87,15 @@ test('AUTO_SIGN holds across every whitelisted token', () => {
   }
 });
 
-// CHANGED BY TOKEN-67/policy-hardening (was: "AUTO_SIGN when token is absent").
-// The old `if (context.token && …)` skipped the whitelist entirely for a missing
-// or falsy token, so omitting the field bought an auto-sign on an unidentified
-// asset. Under the fail-closed posture an unverified token is a HOLD, not a pass.
-// See policyEngine.adversarial.test.js → "token gate".
+// CORRECTED BY TOKEN-67/policy-hardening (was: "AUTO_SIGN when token is absent
+// (token gate only trips on a set value)"). That assertion pinned a fail-open
+// BYPASS as intended behaviour: the old `if (context.token && …)` guarded the
+// allowlist behind a truthiness check, so omitting the key skipped the allowlist
+// entirely and fell through to auto-sign on an unidentified asset — omit one
+// field, bypass one gate, the same class PR #2 was opened to close. An
+// unverified token is a HOLD, not a pass. Reviewed and confirmed as a bug (not
+// deliberate policy) with @@Architect before inverting.
+// See policyEngine.adversarial.test.js → "token: falsy or absent tokens…".
 test('HOLD when token is absent from context (an unidentified asset is not whitelisted)', () => {
   const ctx = goodContext();
   delete ctx.token;
