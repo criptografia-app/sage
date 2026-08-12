@@ -31,7 +31,11 @@ const ERC20_IFACE = new ethers.Interface([
 export const CHAINS = {
   polygon: {
     chainId:    137n,
-    rpc:        process.env.POLYGON_RPC || 'https://polygon-rpc.com',
+    // NB: the previous default `https://polygon-rpc.com` is dead — it now returns
+    // HTTP 401 `API key disabled, reason: tenant disabled`. This is the PRODUCTION
+    // chain default, so it failed closed but silently, on the path that matters
+    // most. publicnode is keyless and live; POLYGON_RPC still overrides.
+    rpc:        process.env.POLYGON_RPC || 'https://polygon-bor-rpc.publicnode.com',
     txService:  'https://safe-transaction-polygon.safe.global',
     name:       'Polygon',
   },
