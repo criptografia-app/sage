@@ -5,6 +5,7 @@
   "type": "module",
   "main": "sage.js",
   "scripts": {
+    "test": "node --test",
     "start": "node sage.js",
     "keygen": "node sage.js keygen",
     "deploy-safe": "node sage.js deploy-safe",
