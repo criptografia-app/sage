@@ -85,6 +85,48 @@ Copy the deployed Safe address into `sage-config.json`:
 }
 ```
 
+Alternatively, `setup.js` can add the agents to an existing Safe for you. **Simulate it
+first** — this needs no private key and spends no gas:
+
+```bash
+node setup.js --dry-run --owner 0xYourOwnerAddress
+```
+
+It replays every step through `eth_call` and reports what would happen, including a
+control showing why the naive `addOwnerWithThreshold` call path reverts. Only run
+`node setup.js` for real once the dry run is clean.
+
+> **Owner-management calls must go through the Safe.** `addOwnerWithThreshold` and
+> `changeThreshold` carry Safe's `authorized` modifier: they require
+> `msg.sender == address(this)`. Called directly from an owner's wallet they revert with
+> **GS031**. They must be built as a Safe transaction, signed, and executed via
+> `execTransaction` — which is what `setup.js` now does.
+
+### ⚠️ Whoever submits a transaction needs its own gas
+
+**The Safe holds the funds, but the account that submits the transaction pays the gas** —
+from its own EOA, in the chain's native token.
+
+This catches people out, because a Safe with a healthy balance still cannot execute
+anything if the submitting account is empty. It normally surfaces as an opaque
+gas-estimation failure at the moment you try to execute.
+
+| Chain    | Native token | Rough top-up   |
+|----------|--------------|----------------|
+| Polygon  | POL          | ~1 POL         |
+| Ethereum | ETH          | ~0.01 ETH      |
+| Base     | ETH          | ~0.005 ETH     |
+| Sepolia  | test ETH     | ~0.02 (faucet) |
+
+**Co-signing is free** — signatures are off-chain and cost nothing, so an agent that only
+ever co-signs needs no balance at all. Only the account that finally calls
+`execTransaction` spends gas. If you always execute from your own wallet, only that wallet
+needs funding; if an agent is meant to execute autonomously, that agent's EOA needs its
+own balance.
+
+`node setup.js --dry-run` includes a gas preflight that checks this and fails loudly
+rather than at gas-estimation time.
+
 ### 4. Add to Claude Desktop
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
