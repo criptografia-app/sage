@@ -33,6 +33,26 @@ function loadConfig() {
   return JSON.parse(readFileSync(cfgPath, 'utf8'));
 }
 
+/**
+ * Resolve the Safe this wallet operates on. SINGLE SOURCE OF TRUTH.
+ *
+ * The startup banner and every tool call MUST resolve the Safe through this one
+ * function, so what SAGE *reports* can never diverge from what it *signs
+ * against*. They used to differ: the banner resolved env-first while every tool
+ * resolved config-first. With SAGE_SAFE_ADDRESS pointing at a testnet Safe, SAGE
+ * printed the testnet address and then operated on the configured mainnet Safe —
+ * the guard an operator would reach for to protect themselves reported success
+ * while doing the opposite.
+ *
+ * Precedence is deliberately UNCHANGED (config first): that is what the tools
+ * have always done, so routing the banner through it is a reporting fix with
+ * zero behaviour change. Which source *should* win is a separate, explicit
+ * decision and is not being smuggled in here.
+ */
+export function resolveSafeAddress(cfg = loadConfig()) {
+  return cfg.safe_address || process.env.SAGE_SAFE_ADDRESS || null;
+}
+
 // ── Audit log ───────────────────────────────────────────────────────────────
 import { appendFileSync } from 'fs';
 function auditLog(entry) {
@@ -131,7 +151,7 @@ const TOOLS = [
 async function handleTool(name, args) {
   const cfg    = loadConfig();
   const chain  = cfg.chain || 'polygon';
-  const safe   = cfg.safe_address || process.env.SAGE_SAFE_ADDRESS;
+  const safe   = resolveSafeAddress(cfg);
 
   if (!safe && !['sage_policy'].includes(name)) {
     return { error: 'SAGE_SAFE_ADDRESS not set. Add it to sage-config.json or export SAGE_SAFE_ADDRESS.' };
@@ -245,7 +265,7 @@ async function runCLI(argv) {
 
   if (cmd === 'pending') {
     const cfg    = loadConfig();
-    const client = new SAGEClient(cfg.chain || 'polygon', cfg.safe_address || process.env.SAGE_SAFE_ADDRESS);
+    const client = new SAGEClient(cfg.chain || 'polygon', resolveSafeAddress(cfg));
     const result = await handleTool('sage_pending', {});
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -253,7 +273,7 @@ async function runCLI(argv) {
 
   if (cmd === 'info') {
     const cfg    = loadConfig();
-    const client = new SAGEClient(cfg.chain || 'polygon', cfg.safe_address || process.env.SAGE_SAFE_ADDRESS);
+    const client = new SAGEClient(cfg.chain || 'polygon', resolveSafeAddress(cfg));
     const result = await handleTool('sage_info', {});
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -301,8 +321,9 @@ function startMCPServer() {
     }
   });
 
+  // Reports the SAME resolution the tools operate on — see resolveSafeAddress().
   console.error('[SAGE] MCP server running on stdio. Wallet: ' +
-    (process.env.SAGE_SAFE_ADDRESS || loadConfig().safe_address || '(not configured)'));
+    (resolveSafeAddress() || '(not configured)'));
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
