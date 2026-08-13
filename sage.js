@@ -18,7 +18,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname }            from 'path';
-import { fileURLToPath }            from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import readline                     from 'readline';
 import { SAGEClient }               from './safeClient.js';
 import { generateAgentKey, loadAgentSigner } from './agentKey.js';
@@ -73,7 +73,7 @@ function auditLog(entry) {
  *
  * @param {object} details - output of SAGEClient.getTransactionDetails()
  */
-function deriveTrustedContext(details) {
+export function deriveTrustedContext(details) {
   return {
     // Real, tx-derived facts (from the Transaction Service / calldata):
     to:              details.to,
@@ -327,9 +327,18 @@ function startMCPServer() {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
-const argv = process.argv.slice(2);
-if (argv.length > 0) {
-  runCLI(argv).catch(e => { console.error(e); process.exit(1); });
-} else {
-  startMCPServer();
+// Only run as a program when invoked directly (`node sage.js ...`). When this
+// module is imported (e.g. by the test suite to reach deriveTrustedContext /
+// resolveSafeAddress), skip the entry point — otherwise a bare import would
+// silently start the MCP server and block on stdin.
+const invokedDirectly = process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  const argv = process.argv.slice(2);
+  if (argv.length > 0) {
+    runCLI(argv).catch(e => { console.error(e); process.exit(1); });
+  } else {
+    startMCPServer();
+  }
 }
