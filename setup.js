@@ -12,27 +12,34 @@
  */
 
 import { ethers }                    from 'ethers';
+import SafeNS                        from '@safe-global/protocol-kit';
 import { createCipheriv, createDecipheriv,
          randomBytes, scryptSync }   from 'crypto';
 import { writeFileSync, existsSync } from 'fs';
 import { join, dirname }             from 'path';
 import { fileURLToPath }             from 'url';
 import readline                      from 'readline';
+import { loadAgentSigner }           from './agentKey.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
+
+// protocol-kit ships CommonJS with no `exports` map, so under Node ESM the
+// default import is the module namespace, not the class — reach through
+// `.default` when present. Same interop guard as safeClient.js.
+const Safe = SafeNS?.default ?? SafeNS;
 
 const SAFE      = '0xe601D7B4103FD508dA521A25D7639F085448196d';
 const NETWORK   = 'eip155:137';
 const RPC       = 'https://polygon-bor-rpc.publicnode.com';
 const THRESHOLD = 2;  // 2-of-3 after adding 2 agents
 
-// ── Minimal ABI for Safe owner management ────────────────────────────────────
-const SAFE_ABI = [
-  'function addOwnerWithThreshold(address owner, uint256 _threshold)',
-  'function changeThreshold(uint256 _threshold)',
-  'function getOwners() view returns (address[])',
-  'function getThreshold() view returns (uint256)',
-];
+// NB: Safe owner-management functions (addOwnerWithThreshold / changeThreshold)
+// are `authorized` — they require `msg.sender == address(this)` and revert with
+// GS031 if called directly by an owner EOA. They must be executed AS A SAFE
+// TRANSACTION (execTransaction with owner signatures). protocol-kit builds and
+// executes those correctly; a hand-rolled `ethers.Contract(SAFE).addOwner...()`
+// call (as this wizard originally did) reverts on-chain every time. That is why
+// there is no owner-management ABI here — we go through protocol-kit instead.
 
 // ── Key encryption (same as agentKey.js) ─────────────────────────────────────
 const SCRYPT_N = 16384, SCRYPT_R = 8, SCRYPT_P = 1, KEY_LEN = 32;
@@ -95,13 +102,23 @@ async function main() {
   for (const name of agents) {
     const keyFile = join(__dir, `.sage-key-${name}.enc`);
     if (existsSync(keyFile)) {
-      console.log(`  ✓ ${name} key already exists — skipping`);
-      // still need the wallet address for the Safe tx
+      console.log(`  ✓ ${name} key already exists — skipping generation`);
+      // We still need the agent's ADDRESS so Step 3 can add it as an owner and
+      // Step 4 can complete a half-finished run. The address lives inside the
+      // encrypted key, so unlock it with the passphrase the operator supplies.
+      // (This is why the wizard is now resumable — the old code stubbed a
+      // placeholder address here and then skipped adding the agent entirely.)
       const pass = await ask(`  Passphrase for existing "${name}" key: `, true);
-      const { decrypt } = await import('./agentKey.js').catch(() => null) || {};
-      // fallback: just read address from encrypted file
-      passphrases[name] = pass;
-      agentWallets[name] = { address: '(existing — run: node sage.js info)' };
+      let signer;
+      try {
+        signer = loadAgentSigner(name, pass, null, __dir);
+      } catch {
+        console.error(`\n  ✗ Wrong passphrase for "${name}" — cannot recover its address.`);
+        process.exit(1);
+      }
+      passphrases[name]  = pass;
+      agentWallets[name] = { address: signer.address };
+      console.log(`    ↳ ${signer.address}`);
       continue;
     }
 
@@ -136,52 +153,72 @@ async function main() {
     process.exit(1);
   }
 
-  // Verify it matches the Safe owner
-  const provider   = new ethers.JsonRpcProvider(RPC);
-  const ownerSigner = new ethers.Wallet(ownerKey, provider);
+  // Verify it matches a current Safe owner. `ownerSigner` is provider-less: we
+  // only need its address here — protocol-kit does all signing/execution.
+  const ownerSigner = new ethers.Wallet(ownerKey);
   console.log(`\n  Signing address: ${ownerSigner.address}`);
 
-  const safe = new ethers.Contract(SAFE, SAFE_ABI, ownerSigner);
-  const currentOwners = await safe.getOwners();
+  // protocol-kit connected as the owner. It builds owner-management txs as
+  // proper Safe transactions and executes them via execTransaction, signing
+  // with `ownerKey`. On a 1-of-N Safe the single owner signature executes
+  // immediately; once threshold is 2, agents must co-sign (the whole point).
+  const protocolKit = await Safe.init({ provider: RPC, signer: ownerKey, safeAddress: SAFE });
+
+  const currentOwners = await protocolKit.getOwners();
   if (!currentOwners.map(a => a.toLowerCase()).includes(ownerSigner.address.toLowerCase())) {
     console.error(`\n  ✗ ${ownerSigner.address} is NOT an owner of this Safe.`);
     console.error(`  Current owners: ${currentOwners.join(', ')}`);
     process.exit(1);
   }
-  console.log(`  ✓ Verified as Safe owner\n`);
+  const startThreshold = await protocolKit.getThreshold();
+  if (startThreshold > 1) {
+    // With threshold > 1 the owner cannot execute alone: adding owners would
+    // need co-signatures this one-shot wizard does not collect. Bail clearly
+    // rather than fire txs that sit half-signed.
+    console.error(`\n  ✗ Safe threshold is ${startThreshold}-of-${currentOwners.length}.`);
+    console.error('  This wizard only works on a 1-of-N Safe (single owner executes alone).');
+    console.error('  Add the agents and raise the threshold from the Safe UI instead.');
+    process.exit(1);
+  }
+  console.log(`  ✓ Verified as Safe owner (threshold ${startThreshold}-of-${currentOwners.length})\n`);
 
   // ── Step 3: Add agent owners ──────────────────────────────────────────────
   console.log('Step 3/4  Adding agents as Safe owners...');
 
-  for (const [i, name] of agents.entries()) {
+  const ownerSet = new Set(currentOwners.map(a => a.toLowerCase()));
+  for (const name of agents) {
     const agentAddr = agentWallets[name].address;
     if (agentAddr.startsWith('(existing')) {
       console.log(`  ⚠  ${name}: skipped (existing key — add manually if not already an owner)`);
       continue;
     }
+    if (ownerSet.has(agentAddr.toLowerCase())) {
+      console.log(`  ✓ ${name} (${agentAddr}) already an owner — skipping`);
+      continue;
+    }
 
-    // For the second agent, threshold stays 1 until we explicitly change it
-    // after both are added
-    const keepThreshold = 1;
+    // Keep threshold at 1 while adding, so each add still executes with the
+    // single owner signature; we raise it to THRESHOLD once both are in.
     console.log(`  Adding ${name} (${agentAddr})...`);
-    const tx = await safe.addOwnerWithThreshold(agentAddr, keepThreshold, {
-      gasLimit: 200_000,
-    });
-    console.log(`    tx: ${tx.hash}`);
-    await tx.wait();
+    const addTx = await protocolKit.createAddOwnerTx({ ownerAddress: agentAddr, threshold: 1 });
+    const res   = await protocolKit.executeTransaction(addTx);
+    console.log(`    tx: ${res.hash}`);
+    await res.transactionResponse?.wait();
+    ownerSet.add(agentAddr.toLowerCase());
     console.log(`    ✓ confirmed`);
   }
 
   // ── Step 4: Change threshold to 2-of-3 ───────────────────────────────────
   console.log(`\nStep 4/4  Changing threshold to ${THRESHOLD}-of-3...`);
-  const txT = await safe.changeThreshold(THRESHOLD, { gasLimit: 100_000 });
-  console.log(`  tx: ${txT.hash}`);
-  await txT.wait();
+  const thrTx  = await protocolKit.createChangeThresholdTx(THRESHOLD);
+  const thrRes = await protocolKit.executeTransaction(thrTx);
+  console.log(`  tx: ${thrRes.hash}`);
+  await thrRes.transactionResponse?.wait();
   console.log(`  ✓ confirmed\n`);
 
   // ── Verify final state ────────────────────────────────────────────────────
-  const finalOwners    = await safe.getOwners();
-  const finalThreshold = await safe.getThreshold();
+  const finalOwners    = await protocolKit.getOwners();
+  const finalThreshold = await protocolKit.getThreshold();
 
   console.log('╔══════════════════════════════════════════════╗');
   console.log('║         SAGE — Setup Complete! ✓            ║');
