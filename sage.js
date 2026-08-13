@@ -27,6 +27,7 @@ import { evaluate, DECISION }       from './policyEngine.js';
 import { proposeBatch, approveAll } from './batchOps.js';
 import { listContacts, resolveRecipientAsync, reverseEns } from './addressBook.js';
 import { makeAuthorizer } from './authz.js';
+import { inferenceStatus, listModels } from './inference.js';
 
 // ── Hardware-2FA device registry ──────────────────────────────────────────────
 // Maps an operator identity (email) → their registered 2FA device. Kept in
@@ -218,6 +219,19 @@ const TOOLS = [
     description: 'Read the current signing policy — what the agents auto-sign vs what requires human approval.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'sage_inference',
+    description: 'Show the inference setup: hosted (CRIPTOGRAFIA subscription) or BYOK (your own API key), which model, whether it is usable, and the models you can select.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'sage_models',
+    description: 'List the models available for an inference provider (anthropic / openai / openrouter) — the menu to pick from once a key is entered.',
+    inputSchema: {
+      type: 'object',
+      properties: { provider: { type: 'string', description: 'anthropic | openai | openrouter (default: the configured provider)' } },
+    },
+  },
 ];
 
 // ── Tool handlers ────────────────────────────────────────────────────────────
@@ -226,7 +240,7 @@ async function handleTool(name, args) {
   const chain  = cfg.chain || 'polygon';
   const safe   = resolveSafeAddress(cfg);
 
-  if (!safe && !['sage_policy', 'sage_address_book'].includes(name)) {
+  if (!safe && !['sage_policy', 'sage_address_book', 'sage_inference', 'sage_models'].includes(name)) {
     return { error: 'SAGE_SAFE_ADDRESS not set. Add it to sage-config.json or export SAGE_SAFE_ADDRESS.' };
   }
 
@@ -374,6 +388,16 @@ async function handleTool(name, args) {
     case 'sage_policy': {
       const cfg = loadConfig();
       return cfg.policy || { message: 'No policy configured. Add "policy" to sage-config.json.' };
+    }
+
+    case 'sage_inference': {
+      return inferenceStatus(loadConfig(), process.env);
+    }
+
+    case 'sage_models': {
+      const provider = args.provider || loadConfig().inference?.provider || process.env.SAGE_INFERENCE_PROVIDER || 'anthropic';
+      try { return { provider, models: listModels(provider) }; }
+      catch (e) { return { error: e.message }; }
     }
 
     default:

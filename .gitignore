@@ -4,3 +4,13 @@ node_modules/
 sage-audit.log
 .env
 *.env
+
+# Internal team coordination (chan/Exchange) — never commit
+Exchange/
+
+# CRIPTOGRAFIA PRIVATE — proprietary paid product; must NOT leak into the public
+# SAGE repo (this repo is pitched to Safe Global). Keep it local / in its own repo.
+PRIVATE/
+
+# Hardware-2FA device registry (public keys/addresses, but deployment-specific)
+authz-devices.json

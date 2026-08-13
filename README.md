@@ -421,6 +421,30 @@ npm test        # runs every test/*.mjs via `node --test`
 
 ---
 
+## Inference & pricing (BYOK or hosted)
+
+SAGE is **MCP-first** — every capability is an agent tool — and the inference that
+drives the agents is a configurable layer (`inference.js`), so SAGE stays free and
+sovereign while offering a paid convenience path:
+
+- **BYOK (free)** — bring your own provider API key (`anthropic` / `openai` /
+  `openrouter`); SAGE surfaces the **selectable models** for that key so you pick
+  one. Nothing routes through us; SAGE stays sovereign.
+- **Hosted ($/mo)** — CRIPTOGRAFIA sells the inference on a subscription; requests
+  route through the SAGE gateway, gated by a license token.
+
+MCP tools: `sage_inference` (current mode / model / usable?) and `sage_models`
+(the menu for a provider). Config lives under `inference` in `sage-config.json`;
+env overrides: `SAGE_INFERENCE_MODE`, `SAGE_INFERENCE_PROVIDER`,
+`SAGE_INFERENCE_MODEL`, the provider key env, and `SAGE_LICENSE`.
+
+> **CRIPTOGRAFIA PRIVATE** — the full agentic private-bank / wealth-management
+> stack — is a *separate, premium* product (bespoke onboarding, compliance,
+> reporting, recovery, fiat bridges, TEE, dedicated support). SAGE free is the
+> sovereign funnel; PRIVATE is the white-glove tier.
+
+---
+
 ## Security model
 
 | Threat | Mitigation |
