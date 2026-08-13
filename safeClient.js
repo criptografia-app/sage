@@ -6,7 +6,7 @@
  * blockchain state and act on it.
  */
 import SafeApiKitNS from '@safe-global/api-kit';
-import SafeNS from '@safe-global/protocol-kit';
+import SafeNS, { EthSafeSignature as EthSafeSignatureNamed } from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 
 // Both Safe SDKs ship CommonJS with no `exports` map, so under Node ESM the
@@ -20,6 +20,11 @@ import { ethers } from 'ethers';
 // guard would then break the mirror way.
 const SafeApiKit = SafeApiKitNS?.default ?? SafeApiKitNS;
 const Safe       = SafeNS?.default       ?? SafeNS;
+// EthSafeSignature wraps an (owner, signature) pair so protocol-kit can execute a
+// tx with signatures collected out-of-band (from the Transaction Service). Same
+// CJS/ESM interop reach-through as the classes above — the named import wins when
+// present, else fall through the namespace.
+const EthSafeSignature = EthSafeSignatureNamed ?? SafeNS?.EthSafeSignature ?? SafeNS?.default?.EthSafeSignature;
 
 // ERC-20 transfer(address,uint256) — used to decode token transfers out of calldata
 const ERC20_IFACE = new ethers.Interface([
@@ -88,6 +93,9 @@ export class SAGEClient {
       nonce:            tx.nonce,
       confirmations:    tx.confirmations?.length || 0,
       confirmationsRequired: tx.confirmationsRequired,
+      // Owners who have ALREADY signed — lets a batch signer skip txs it has
+      // itself confirmed (never double-sign) and know when threshold is reached.
+      confirmedBy:      (tx.confirmations || []).map(c => c.owner),
       proposedBy:       tx.proposer,
       submissionDate:   tx.submissionDate,
       // Human-readable
@@ -242,6 +250,70 @@ export class SAGEClient {
     await this.apiKit.confirmTransaction(safeTxHash, signature);
 
     return { signed: true, safeTxHash, signer: agentWallet.address };
+  }
+
+  /**
+   * Execute a pending tx that has already collected enough signatures to meet
+   * the Safe's threshold. The executing agent pays gas (it acts as the relayer)
+   * and must hold native funds on the chain.
+   *
+   * We rebuild the exact pending tx, re-attach the owner signatures the
+   * Transaction Service already holds, and re-derive the EIP-712 hash — refusing
+   * to execute if it does not match the requested hash, so we can never execute
+   * a different tx than the one that was reviewed and signed.
+   *
+   * @param {string}        safeTxHash
+   * @param {ethers.Wallet} agentWallet - the agent that submits (and pays for) the execution
+   */
+  async executeTransaction(safeTxHash, agentWallet) {
+    const protocolKit = await this._protocolKit(agentWallet);
+    const pending     = await this.apiKit.getTransaction(safeTxHash);
+
+    const confirmations = pending.confirmations || [];
+    if (confirmations.length < pending.confirmationsRequired) {
+      throw new Error(
+        `not enough signatures — have ${confirmations.length}, need ${pending.confirmationsRequired}; refusing to execute`,
+      );
+    }
+
+    const safeTx = await protocolKit.createTransaction({
+      transactions: [{
+        to:        pending.to,
+        value:     pending.value,
+        data:      pending.data || '0x',
+        operation: pending.operation,
+      }],
+      options: {
+        safeTxGas:      pending.safeTxGas,
+        baseGas:        pending.baseGas,
+        gasPrice:       pending.gasPrice,
+        gasToken:       pending.gasToken,
+        refundReceiver: pending.refundReceiver,
+        nonce:          pending.nonce,
+      },
+    });
+
+    const derivedHash = await protocolKit.getTransactionHash(safeTx);
+    if (derivedHash.toLowerCase() !== safeTxHash.toLowerCase()) {
+      throw new Error(
+        `safeTxHash mismatch — service says ${safeTxHash}, protocol-kit derives ${derivedHash}; refusing to execute`,
+      );
+    }
+
+    // Re-attach the signatures the Transaction Service already collected so the
+    // on-chain execTransaction carries a full, threshold-meeting signature set.
+    for (const conf of confirmations) {
+      safeTx.addSignature(new EthSafeSignature(conf.owner, conf.signature));
+    }
+
+    const exec    = await protocolKit.executeTransaction(safeTx);
+    const receipt = await exec.transactionResponse?.wait?.();
+    return {
+      executed:   true,
+      safeTxHash,
+      execTxHash: exec.hash ?? receipt?.hash ?? null,
+      executor:   agentWallet.address,
+    };
   }
 
   /**

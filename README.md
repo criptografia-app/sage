@@ -103,15 +103,88 @@ then submits the confirmation.
 
 ---
 
+## The financial team: `/proposal` and `/signer`
+
+SAGE runs as a **team of two agents plus you**, each agent a Claude skill in its
+own container holding only its own key — so an agent literally *cannot* act
+outside its role:
+
+```
+Authenticated owner (Privy / email)
+   │  "/proposal  send 500 USDC to Acme and 200 to vitalik.eth"
+   ▼
+/proposal  (container: proposal/compliance key only)
+   │  resolves recipients (name / ENS / #number / address), proposes each,
+   │  adds signature #1 — never executes
+   ▼   you review the pending page (names + ENS, not raw hex)
+   │  "/signer  approve all I just checked"
+   ▼
+/signer    (container: execution key only)
+   │  adds signature #2 → 2-of-3 reached → executes
+   ▼   bulk but INDEPENDENT — one failing tx never aborts the rest
+```
+
+### Authorization model — "2 agents + your OK"
+
+The two agent signatures satisfy the 2-of-3 threshold; **your key never signs
+on-chain.** Instead, your **authenticated instruction is the human
+co-signature.** This is what makes it hands-free without being unguarded:
+
+- **Identity is the gate.** `/signer` refuses without an authenticated operator
+  (`SAGE_OPERATOR` — the owner's email, via Privy in production). Identity ties to
+  the Safe.
+- **Every approval is accountable.** The operator who authorized a batch is
+  recorded in `sage-audit.log` for every signature — including any case where the
+  operator's OK *overrode* a policy `HOLD_HUMAN`. That override is deliberate (you
+  reviewed it) and always traceable to you.
+- **Hard `REJECT` is never overridden in bulk.** An AML-flagged tx is surfaced to
+  be handled one at a time, not swept along by "approve all".
+- **Container isolation** means a compromised proposal agent can propose but can
+  never co-sign to threshold, and vice-versa.
+
+> This is a distinct, explicitly-operator-authorized path — separate from the
+> autonomous, fail-closed `sage_approve`. It does **not** reopen the caller-context
+> bypass closed in TOKEN-67: policy still evaluates on the *real* on-chain tx; the
+> operator's authenticated identity, not caller-supplied facts, is what authorizes.
+
+Execution is **bulk but independent**: `/signer` signs every approved tx and
+executes each on its own nonce; one failure is reported and skipped, never
+reverting the others. (An atomic MultiSend batch is a roadmap option.)
+
+---
+
+## Address book & ENS
+
+You approve **names**, not 40 hex characters you can't eyeball — a safety win as
+much as a UX one.
+
+- **Address book** (`address-book.json`) — saved recipients referable by
+  **name** ("Acme Corp"), **number** ("#5"), or exact/unique-prefix match.
+  *"Open the address book"* → `sage_address_book` returns the numbered list.
+- **ENS everywhere** — a recipient can be an **ENS name** ("vitalik.eth"), resolved
+  forward at propose time (on Ethereum mainnet, regardless of the Safe's chain,
+  via `ENS_RPC`/`ETH_RPC`). Addresses are **reverse-resolved** to their ENS name
+  for display where one exists (best-effort — a flaky RPC just omits it).
+- **Fail loud, never wrong.** An ambiguous or unresolvable reference **aborts** the
+  proposal (and aborts the *whole* batch) rather than sending funds to a
+  silently-wrong address.
+
+Resolution order: literal `0x` address → ENS name → book number → book name.
+
+---
+
 ## MCP Tools
 
 Once SAGE is configured in Claude Desktop:
 
 | You say | Tool | What happens |
 |---------|------|--------------|
+| *"open the address book"* | `sage_address_book` | Lists saved recipients (numbered; ENS-decorated) |
+| *"propose transfers to Acme and vitalik.eth"* | `sage_propose_batch` | Proposal agent proposes many txs at once (first signature each) |
+| *"propose a transfer to #5"* | `sage_propose` | Proposes one tx; recipient resolved by name / ENS / number / address |
+| *"signer, approve all I've checked"* | `sage_approve_all` | Signing agent co-signs every pending tx + executes those at threshold |
 | *"what's pending in the wallet?"* | `sage_pending` | Lists txs awaiting signatures + who has signed |
-| *"sign the 500 USDT trade"* | `sage_approve` | Derives facts from the real tx → policy → co-sign or hold |
-| *"propose a transfer to 0xABC"* | `sage_propose` | Creates a pending tx in the Safe (others must co-sign) |
+| *"sign the 500 USDT trade"* | `sage_approve` | Derives facts from the real tx → policy → co-sign or hold (single, autonomous) |
 | *"show wallet state"* | `sage_info` | Owners, threshold, nonce, pending count |
 | *"last 10 transactions"* | `sage_history` | Executed transaction history |
 | *"show signing policy"* | `sage_policy` | Current auto-sign rules |
@@ -237,8 +310,14 @@ node sage.js                   # start the MCP server (JSON-RPC over stdio)
 node sage.js keygen <name>     # generate + encrypt an agent key
 node sage.js pending           # list pending Safe transactions
 node sage.js info              # Safe state summary (owners, threshold, nonce)
+node sage.js propose-batch '<json-array>'   # proposal agent: propose many txs (or via stdin)
+SAGE_OPERATOR=you@corp.com node sage.js approve-all   # signing agent: co-sign + execute pending
 node setup.js                  # one-shot: keys → owners → 2-of-3 threshold
 ```
+
+The `/proposal` and `/signer` **skills** (in `.claude/skills/`) wrap these so an
+operator just types `/proposal …` or `/signer approve all`. Each is meant to run
+in its own container with only that agent's passphrase in the environment.
 
 Importing `sage.js` as a module (for `deriveTrustedContext` / `resolveSafeAddress`) does
 **not** start the server — the entry point is guarded by an invoked-directly check.
@@ -309,6 +388,8 @@ npm test        # runs every test/*.mjs via `node --test`
 | `fail-closed.mjs` | Fed real tx facts, the engine **never** auto-signs while compliance is unwired. |
 | `safe-address-resolution.mjs` | Reported Safe can't diverge from the operated Safe (Bug 5). |
 | `sdk-interop.mjs` | The CJS/ESM `.default` interop for protocol-kit / api-kit resolves to callable classes. |
+| `batch-ops.mjs` | The team money path (mock client): operator required; bulk-but-independent; HOLD override is recorded; REJECT not overridden; no double-signing; executes only at threshold. |
+| `address-book.mjs` | Recipient resolution: address / index / name / unique-prefix / ambiguity errors; ENS forward + best-effort reverse (mock provider). |
 
 ---
 
@@ -322,7 +403,10 @@ npm test        # runs every test/*.mjs via `node --test`
 | Agent acting alone | Threshold 2-of-3 — an agent signature alone is never enough. |
 | Server compromise | Agent keys are AES-256-GCM encrypted at rest; passphrase never stored on disk. |
 | Auto-signing on unverified facts | Fail-closed: KYC/AML default un-verified and unknown value holds — nothing auto-signs until compliance is wired. |
-| AML violation | `REJECT` — the agent refuses and logs. |
+| AML violation | `REJECT` — the agent refuses and logs; not overridable in a bulk approval. |
+| Unauthenticated batch approval | `sage_approve_all` refuses without an operator identity; every approval (and any HOLD override) is logged against that operator. |
+| One agent compromised | Each agent runs in its own container with only its key; it can reach one signature, never the 2-of-3 threshold alone. |
+| Funds sent to a wrong/typo'd recipient | Names/ENS are resolved and shown back; an ambiguous or unresolvable reference aborts the (whole) proposal rather than guessing. |
 
 ---
 
@@ -340,6 +424,18 @@ series of **human-gated** steps — an agent must not cross these alone:
 Only then does relaxing the fail-closed defaults make sense — and that's an explicit human
 decision, backed by the audit log and the test suite above.
 
+### Also on the roadmap
+
+- **Privy auth** — real verified-email identity as the operator principal (today
+  the operator is the authenticated MCP/CLI session; the seam is already in place).
+- **Per-agent containers** — ship `/proposal` and `/signer` as isolated container
+  services, each with only its own key.
+- **Voice** — an opt-in toggle for spoken interaction: the wallet reads back what
+  it's about to propose/sign and confirms out loud. Client-layer (TTS/STT); the
+  signing engine is unchanged.
+- **Atomic MultiSend** — an option to bundle an approved batch into a single
+  all-or-nothing Safe transaction (today: bulk-but-independent execution).
+
 ---
 
 ## Integration with CRIPTOGRAFIA P2P Desk
@@ -356,12 +452,16 @@ the on-chain tx hash. See [CRIPTO-181](https://linear.app/criptografia/issue/CRI
 ```
 sage/
 ├── sage.js           MCP server (JSON-RPC/stdio) + CLI + trusted-context builder
-├── safeClient.js     Safe Transaction Service wrapper (perception + action)
+├── safeClient.js     Safe Transaction Service wrapper — perceive / sign / execute
 ├── policyEngine.js   AUTO_SIGN / HOLD_HUMAN / REJECT
+├── batchOps.js       Team workflow: proposeBatch + approveAll (bulk, independent)
+├── addressBook.js    Recipient resolution — name / number / ENS (fwd + reverse)
+├── address-book.json Saved recipients
 ├── agentKey.js       Encrypted agent-key management (AES-256-GCM + scrypt)
 ├── setup.js          One-shot wizard: keys → owners → 2-of-3 threshold
 ├── sage-config.json  Chain, Safe address, policy rules
-├── test/             Offline conformance + policy + fail-closed suites
+├── .claude/skills/   /proposal and /signer agent skills
+├── test/             Offline suites (policy, fail-closed, batch, address book, hash)
 ├── Dockerfile · docker-compose.yml · .env.example
 ```
 

@@ -1,0 +1,7 @@
+{
+  "contacts": [
+    { "name": "Treasury cold", "address": "0x0000000000000000000000000000000000000001", "note": "Example — replace with your own contacts" },
+    { "name": "Acme Corp", "address": "0x0000000000000000000000000000000000000002", "note": "Example OTC counterparty" },
+    { "name": "Payroll gnosis", "address": "0x0000000000000000000000000000000000000003", "note": "Example monthly payroll Safe" }
+  ]
+}

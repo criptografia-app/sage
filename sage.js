@@ -20,9 +20,23 @@ import { readFileSync, existsSync } from 'fs';
 import { join, dirname }            from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import readline                     from 'readline';
-import { SAGEClient }               from './safeClient.js';
+import { ethers }                   from 'ethers';
+import { SAGEClient, CHAINS }       from './safeClient.js';
 import { generateAgentKey, loadAgentSigner } from './agentKey.js';
 import { evaluate, DECISION }       from './policyEngine.js';
+import { proposeBatch, approveAll } from './batchOps.js';
+import { listContacts, resolveRecipientAsync, reverseEns } from './addressBook.js';
+
+// ENS lives on Ethereum mainnet regardless of which chain the Safe is on, so ENS
+// resolution always goes through a mainnet provider (ENS_RPC / ETH_RPC override).
+// Lazily created so nothing pays for it unless an ENS name is actually used.
+let _ensProvider = null;
+function ensProvider() {
+  if (!_ensProvider) {
+    _ensProvider = new ethers.JsonRpcProvider(process.env.ENS_RPC || CHAINS.ethereum.rpc);
+  }
+  return _ensProvider;
+}
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -131,6 +145,50 @@ const TOOLS = [
     },
   },
   {
+    name: 'sage_address_book',
+    description: 'PROPOSAL AGENT: list the saved recipients ("open address book"). Returns a numbered list of name → address so you can say "send to #5" or "send to Acme".',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'sage_propose_batch',
+    description: 'PROPOSAL AGENT: propose many transactions to the Safe at once, each carrying the agent\'s first signature. Returns a safeTxHash per proposed tx.',
+    inputSchema: {
+      type: 'object',
+      required: ['transactions'],
+      properties: {
+        transactions: {
+          type: 'array',
+          description: 'List of { to, value, data } to propose',
+          items: {
+            type: 'object',
+            required: ['to'],
+            properties: {
+              to:    { type: 'string', description: 'Destination address' },
+              value: { type: 'string', description: 'Value in wei (default 0)' },
+              data:  { type: 'string', description: 'Calldata hex (default 0x)' },
+            },
+          },
+        },
+        agent:    { type: 'string', description: 'Proposing agent (default: compliance)' },
+        operator: { type: 'string', description: 'Authenticated owner identity (email) authorising the batch — recorded for audit.' },
+      },
+    },
+  },
+  {
+    name: 'sage_approve_all',
+    description: 'SIGNING AGENT: on the authenticated owner\'s instruction ("approve all I\'ve checked"), add the agent\'s signature to every pending tx and execute those that reach threshold. Bulk but independent — one failure does not abort the rest.',
+    inputSchema: {
+      type: 'object',
+      required: ['operator'],
+      properties: {
+        operator: { type: 'string', description: 'Authenticated owner identity (email). REQUIRED — this instruction is the human co-signature and is recorded for audit.' },
+        agent:    { type: 'string', description: 'Signing agent (default: execution)' },
+        only:     { type: 'array', items: { type: 'string' }, description: 'Optional allow-list of safeTxHashes to act on (default: all pending).' },
+        execute:  { type: 'boolean', description: 'Execute txs that reach threshold after signing (default true).' },
+      },
+    },
+  },
+  {
     name: 'sage_history',
     description: 'Get the last N executed transactions from this Safe.',
     inputSchema: {
@@ -153,7 +211,7 @@ async function handleTool(name, args) {
   const chain  = cfg.chain || 'polygon';
   const safe   = resolveSafeAddress(cfg);
 
-  if (!safe && !['sage_policy'].includes(name)) {
+  if (!safe && !['sage_policy', 'sage_address_book'].includes(name)) {
     return { error: 'SAGE_SAFE_ADDRESS not set. Add it to sage-config.json or export SAGE_SAFE_ADDRESS.' };
   }
 
@@ -221,14 +279,68 @@ async function handleTool(name, args) {
       return { ...result, decision, reasons };
     }
 
+    case 'sage_address_book': {
+      const contacts = listContacts();
+      if (contacts.length === 0) return { message: 'Address book empty. Add contacts to address-book.json.', contacts: [] };
+      // Best-effort reverse ENS so the popup shows a name where one exists.
+      // Never blocks the listing — a flaky RPC just leaves `ens: null`.
+      const withEns = await Promise.all(contacts.map(async c => ({
+        ...c, ens: await reverseEns(c.address, ensProvider()),
+      })));
+      return { count: withEns.length, contacts: withEns };
+    }
+
     case 'sage_propose': {
       const { to, value = '0', data = '0x', agent = 'execution' } = args;
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
       if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
 
+      // Resolve `to`: accepts a literal address, an ENS name ("acme.eth"), a book
+      // number ("5"), or a saved name ("Acme"). Fails loudly on no/ambiguous
+      // match so funds never go to a silently-wrong recipient.
+      let recipient;
+      try { recipient = await resolveRecipientAsync(to, { provider: ensProvider() }); }
+      catch (e) { return { error: e.message }; }
+
       const signer = loadAgentSigner(agent, pass, client.provider);
-      const result = await client.proposeTransaction({ to, value, data }, signer);
-      auditLog({ action: 'proposed', agent, signer: signer.address, to, value });
+      const result = await client.proposeTransaction({ to: recipient.address, value, data }, signer);
+      auditLog({ action: 'proposed', agent, signer: signer.address, to: recipient.address, to_name: recipient.name, value });
+      return { ...result, recipient };
+    }
+
+    case 'sage_propose_batch': {
+      const { transactions, agent = 'compliance', operator = process.env.SAGE_OPERATOR } = args;
+      const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
+      if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
+
+      // Resolve every recipient BEFORE proposing anything (addresses, ENS names,
+      // book numbers/names) — a typo'd/ambiguous/unresolvable name aborts the
+      // whole batch rather than proposing a partial or wrong set.
+      let resolved;
+      try {
+        resolved = await Promise.all((transactions || []).map(async t => {
+          const r = await resolveRecipientAsync(t.to, { provider: ensProvider() });
+          return { ...t, to: r.address, to_name: r.name };
+        }));
+      } catch (e) { return { error: e.message }; }
+
+      const signer = loadAgentSigner(agent, pass, client.provider);
+      const result = await proposeBatch(client, signer, resolved, { operator });
+      auditLog({ action: 'proposed_batch', agent, signer: signer.address, operator, count: result.count, summary: result.summary });
+      return result;
+    }
+
+    case 'sage_approve_all': {
+      const { agent = 'execution', only = null, execute = true, operator = process.env.SAGE_OPERATOR } = args;
+      if (!operator) return { error: 'operator identity required — pass `operator` (authenticated owner email) or set SAGE_OPERATOR. A batch approval must be authorised by an authenticated owner.' };
+      const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
+      if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
+
+      const signer = loadAgentSigner(agent, pass, client.provider);
+      const result = await approveAll(client, signer, { operator, only, execute });
+      auditLog({ action: 'approve_all', agent, signer: signer.address, operator, count: result.count, summary: result.summary,
+                 // record the per-tx outcome so an override is always traceable to the authorising owner
+                 results: result.results.map(r => ({ safeTxHash: r.safeTxHash, status: r.status, policy: r.policy, overrode_hold: r.overrode_hold })) });
       return result;
     }
 
@@ -275,6 +387,35 @@ async function runCLI(argv) {
     const cfg    = loadConfig();
     const client = new SAGEClient(cfg.chain || 'polygon', resolveSafeAddress(cfg));
     const result = await handleTool('sage_info', {});
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  // Signing agent: `node sage.js approve-all` — authorised by SAGE_OPERATOR.
+  // Powers the `/signer` skill. Operator identity comes from the env so the
+  // authenticated owner is bound to the session, not passed on the command line.
+  if (cmd === 'approve-all') {
+    const result = await handleTool('sage_approve_all', {
+      agent:    process.env.SAGE_AGENT || 'execution',
+      operator: process.env.SAGE_OPERATOR,
+      execute:  process.env.SAGE_NO_EXECUTE ? false : true,
+    });
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  // Proposal agent: `node sage.js propose-batch '<json-array>'` (or via stdin).
+  // Powers the `/proposal` skill. JSON is a list of { to, value, data }.
+  if (cmd === 'propose-batch') {
+    const raw = rest[0] || readFileSync(0, 'utf8');   // fd 0 = stdin when no arg
+    let transactions;
+    try { transactions = JSON.parse(raw); }
+    catch { console.error('propose-batch: expected a JSON array of { to, value, data }'); process.exit(1); }
+    const result = await handleTool('sage_propose_batch', {
+      transactions,
+      agent:    process.env.SAGE_AGENT || 'compliance',
+      operator: process.env.SAGE_OPERATOR,
+    });
     console.log(JSON.stringify(result, null, 2));
     return;
   }
