@@ -95,11 +95,26 @@ export class SAGEClient {
     }));
   }
 
-  /** Get the current Safe balance (native token + ERC-20s). */
+  /**
+   * Get the Safe's NATIVE-token balance straight from the RPC.
+   *
+   * The old implementation called `apiKit.getUsdBalances()` — an endpoint the
+   * Safe Transaction Service dropped. The method no longer exists on api-kit
+   * v2.x, so every caller hit a `TypeError` at runtime; it was a dead method
+   * masquerading as perception. Native balance from the provider is real,
+   * keyless, and always available. ERC-20 / USD valuations need a token indexer
+   * or price oracle (out of scope here) — expose those through a dedicated tool
+   * once one is wired, rather than resurrecting a removed endpoint.
+   */
   async getBalance() {
     if (!this.safeAddress) throw new Error('No Safe address configured');
-    const balances = await this.apiKit.getUsdBalances(this.safeAddress);
-    return balances;
+    const wei = await this.provider.getBalance(this.safeAddress);
+    return {
+      address:    this.safeAddress,
+      native_wei: wei.toString(),
+      native:     ethers.formatEther(wei),
+      symbol:     this.chain.chainId === 137n ? 'POL' : 'ETH',
+    };
   }
 
   /** Get Safe metadata: owners, threshold, nonce. */
@@ -108,13 +123,20 @@ export class SAGEClient {
     return this.apiKit.getSafeInfo(this.safeAddress);
   }
 
-  /** Get transaction history (executed txs). */
+  /**
+   * Get executed transaction history, capped at `limit`.
+   *
+   * `getAllTransactions` accepts only { executed, queued, trusted } — it has NO
+   * `limit` option, so the value passed here used to be silently dropped and the
+   * service's full default page came back regardless. `sage_history` advertises
+   * a `limit`, so we honour it by slicing the page ourselves.
+   */
   async getHistory(limit = 20) {
     if (!this.safeAddress) throw new Error('No Safe address configured');
     const res = await this.apiKit.getAllTransactions(this.safeAddress, {
-      executed: true, limit,
+      executed: true,
     });
-    return res.results;
+    return res.results.slice(0, limit);
   }
 
   // ── ACTION — what the wallet does ─────────────────────────────────────────
