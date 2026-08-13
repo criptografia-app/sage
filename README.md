@@ -418,6 +418,50 @@ npm test        # runs every test/*.mjs via `node --test`
 | `batch-ops.mjs` | The team money path (mock client): operator required; bulk-but-independent; HOLD override is recorded; REJECT not overridden; no double-signing; executes only at threshold. |
 | `address-book.mjs` | Recipient resolution: address / index / name / unique-prefix / ambiguity errors; ENS forward + best-effort reverse (mock provider). |
 | `authz.mjs` | Hardware 2FA with real crypto: Trezor EIP-712 (ethers) + YubiKey WebAuthn P-256 (Node crypto); batch-binding, TTL, replay, device-type + presence checks. |
+| `remote-signer.mjs` | Keyless signing: valid owner sig from a `signDigest`-only backend; v-normalization; refuses a signature that doesn't recover to the owner; HTTP vault backend (mock fetch) incl. wrong-key + error paths. |
+
+---
+
+## Keyless signing (Warden / Vault)
+
+An agent never has to hold a private key. When a signature is needed, the agent
+computes the canonical Safe **EIP-712 hash locally**, then makes a **request to a
+vault** (Warden / HashiCorp Vault Transit / a KMS) that holds the key and returns
+**only a signature**. The key never enters the agent process.
+
+- **`signer.js`** — `RemoteSigner` over a pluggable backend that exposes only
+  `signDigest(digest) → { r, s }`. Backends: `local` (in-memory key — dev / SAGE
+  free tier only), and `http` / `warden` / `vault` (generic `POST { keyRef, digest }
+  → { r, s }`).
+- **Verified before submit** — `RemoteSigner` **refuses** any returned signature
+  that does not recover to the expected owner address, so a wrong or compromised
+  vault key can never be silently submitted.
+- **`safeClient.signTransactionKeyless()`** — derives the exact canonical hash
+  (via protocol-kit's pure `generateTypedData`, identical to the
+  hash-conformance vector), checks it against the requested `safeTxHash`, then
+  delegates signing to the vault.
+
+This works in **both SAGE and PRIVATE**. Configure it per agent under `keys` in
+`sage-config.json` — with no `keys` entry, SAGE uses the local encrypted key as
+before (nothing changes):
+
+```json
+{
+  "keys": {
+    "execution": {
+      "backend":  "warden",
+      "address":  "0xAgentOwnerAddress",
+      "endpoint": "https://your-vault/sign",
+      "keyRef":   "agents/execution",
+      "headers":  { "authorization": "Bearer ${VAULT_TOKEN}" }
+    }
+  }
+}
+```
+
+`endpoint` / `keyRef` / header values support `${ENV}` placeholders. In SAGE free,
+omit `keys` and keep the local encrypted keystore; in **PRIVATE**, every agent is
+keyless by policy (see `PRIVATE/ARCHITECTURE-secrets.md`).
 
 ---
 
@@ -453,7 +497,8 @@ env overrides: `SAGE_INFERENCE_MODE`, `SAGE_INFERENCE_PROVIDER`,
 | Policy bypass via crafted args | Decisions derive from the real on-chain pending tx; caller context is ignored. |
 | Wrong-tx signing | `signTransaction` re-derives the EIP-712 hash and refuses if it ≠ the requested hash. |
 | Agent acting alone | Threshold 2-of-3 — an agent signature alone is never enough. |
-| Server compromise | Agent keys are AES-256-GCM encrypted at rest; passphrase never stored on disk. |
+| Server compromise | Agent keys are AES-256-GCM encrypted at rest; passphrase never stored on disk. **Keyless mode:** the key can live entirely in a vault (Warden / Vault) so it never enters the agent — a popped host can request signatures (still policy + 2FA gated) but cannot steal the key. |
+| Wrong / compromised vault key | `RemoteSigner` verifies the returned signature recovers to the expected owner and refuses otherwise. |
 | Auto-signing on unverified facts | Fail-closed: KYC/AML default un-verified and unknown value holds — nothing auto-signs until compliance is wired. |
 | AML violation | `REJECT` — the agent refuses and logs; not overridable in a bulk approval. |
 | Unauthenticated batch approval | `sage_approve_all` refuses without an operator identity; every approval (and any HOLD override) is logged against that operator. |
@@ -512,6 +557,7 @@ sage/
 ├── policyEngine.js   AUTO_SIGN / HOLD_HUMAN / REJECT
 ├── batchOps.js       Team workflow: proposeBatch + approveAll (bulk, independent)
 ├── authz.js          Hardware 2FA authorization — Trezor EIP-712 + YubiKey WebAuthn
+├── signer.js         Keyless remote signing — RemoteSigner over Warden / Vault backends
 ├── addressBook.js    Recipient resolution — name / number / ENS (fwd + reverse)
 ├── address-book.json Saved recipients
 ├── agentKey.js       Encrypted agent-key management (AES-256-GCM + scrypt)

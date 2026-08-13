@@ -6,7 +6,7 @@
  * blockchain state and act on it.
  */
 import SafeApiKitNS from '@safe-global/api-kit';
-import SafeNS, { EthSafeSignature as EthSafeSignatureNamed } from '@safe-global/protocol-kit';
+import SafeNS, { EthSafeSignature as EthSafeSignatureNamed, generateTypedData } from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 
 // Both Safe SDKs ship CommonJS with no `exports` map, so under Node ESM the
@@ -314,6 +314,58 @@ export class SAGEClient {
       execTxHash: exec.hash ?? receipt?.hash ?? null,
       executor:   agentWallet.address,
     };
+  }
+
+  /**
+   * KEYLESS co-signing — no private key in the agent. Compute the canonical Safe
+   * EIP-712 hash locally, verify it matches the requested one, then ask the
+   * REMOTE SIGNER (vault / Warden) to sign the hash. The key never leaves the
+   * vault; we only ever hold the returned signature.
+   *
+   * Uses protocol-kit's `generateTypedData` (a pure function — no key, no init)
+   * to build the exact typed data, so the hash is identical to the canonical one
+   * proven in test/hash-conformance.mjs.
+   *
+   * @param {string}       safeTxHash   - hash of the pending tx to co-sign
+   * @param {RemoteSigner} remoteSigner - a keyless signer bound to an owner address
+   */
+  async signTransactionKeyless(safeTxHash, remoteSigner) {
+    if (!this.safeAddress) throw new Error('No Safe address configured');
+    const pending = await this.apiKit.getTransaction(safeTxHash);
+    const info    = await this.getSafeInfo();
+    const safeVersion = info?.version || '1.3.0';
+
+    const typed = generateTypedData({
+      safeAddress: this.safeAddress,
+      safeVersion,
+      chainId: this.chain.chainId,
+      data: {
+        to:             pending.to,
+        value:          pending.value,
+        data:           pending.data || '0x',
+        operation:      pending.operation,
+        safeTxGas:      pending.safeTxGas,
+        baseGas:        pending.baseGas,
+        gasPrice:       pending.gasPrice,
+        gasToken:       pending.gasToken,
+        refundReceiver: pending.refundReceiver,
+        nonce:          pending.nonce,
+      },
+    });
+    const { SafeTx } = typed.types;   // drop EIP712Domain for ethers
+    const derivedHash = ethers.TypedDataEncoder.hash(typed.domain, { SafeTx }, typed.message);
+
+    if (derivedHash.toLowerCase() !== safeTxHash.toLowerCase()) {
+      throw new Error(
+        `safeTxHash mismatch — service says ${safeTxHash}, locally derived ${derivedHash}; refusing to sign`,
+      );
+    }
+
+    // The key stays in the vault; we send the digest and get a signature back.
+    const signature = await remoteSigner.signSafeTxHash(derivedHash);
+    await this.apiKit.confirmTransaction(safeTxHash, signature);
+
+    return { signed: true, safeTxHash, signer: remoteSigner.getAddress(), keyless: true };
   }
 
   /**

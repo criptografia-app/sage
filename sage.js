@@ -28,6 +28,32 @@ import { proposeBatch, approveAll } from './batchOps.js';
 import { listContacts, resolveRecipientAsync, reverseEns } from './addressBook.js';
 import { makeAuthorizer } from './authz.js';
 import { inferenceStatus, listModels } from './inference.js';
+import { makeSigner } from './signer.js';
+
+// ── Keyless signing resolver ──────────────────────────────────────────────────
+// When an agent is configured with a remote key backend (Warden / Vault), no
+// private key ever lives in this process — signing is a request to the vault.
+// Config lives under `keys` in sage-config.json, e.g.
+//   "keys": { "execution": { "backend": "warden", "address": "0x..",
+//                            "endpoint": "https://vault/sign", "keyRef": "agent/exec" } }
+// keyRef/endpoint may use ${ENV} placeholders resolved from the environment.
+function resolveEnvPlaceholders(v) {
+  return typeof v === 'string'
+    ? v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k) => process.env[k] ?? '')
+    : v;
+}
+function keylessSignerFor(agent, cfg) {
+  const spec = cfg.keys && cfg.keys[agent];
+  if (!spec || spec.backend === 'local') return null;   // no remote backend → use local encrypted key
+  const headers = spec.headers ? Object.fromEntries(
+    Object.entries(spec.headers).map(([k, v]) => [k, resolveEnvPlaceholders(v)])) : {};
+  return makeSigner({
+    ...spec,
+    endpoint: resolveEnvPlaceholders(spec.endpoint),
+    keyRef:   resolveEnvPlaceholders(spec.keyRef),
+    headers,
+  });
+}
 
 // ── Hardware-2FA device registry ──────────────────────────────────────────────
 // Maps an operator identity (email) → their registered 2FA device. Kept in
@@ -279,8 +305,12 @@ async function handleTool(name, args) {
 
     case 'sage_approve': {
       const { safe_tx_hash, agent = 'execution' } = args;
+
+      // Keyless path: if this agent has a remote key backend (Warden / Vault),
+      // no private key lives here — we don't need a passphrase to unlock one.
+      const keyless = keylessSignerFor(agent, cfg);
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
-      if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
+      if (!keyless && !pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key (or configure keys.${agent} for a remote vault backend).` };
 
       // SECURITY: never gate auto-signing on caller-supplied context. Any
       // kyc_verified / aml_clear / value_usd the caller passes in `args` is
@@ -301,10 +331,16 @@ async function handleTool(name, args) {
         return { signed: false, decision, reasons, message: 'Transaction held — human co-signature required.' };
       }
 
-      // Auto-sign
-      const signer = loadAgentSigner(agent, pass, client.provider);
-      const result = await client.signTransaction(safe_tx_hash, signer);
-      auditLog({ action: 'signed', safe_tx_hash, agent, signer: signer.address });
+      // Auto-sign. Keyless (vault) if configured, else the local encrypted key.
+      let result;
+      if (keyless) {
+        result = await client.signTransactionKeyless(safe_tx_hash, keyless);
+        auditLog({ action: 'signed', safe_tx_hash, agent, signer: keyless.getAddress(), keyless: true });
+      } else {
+        const signer = loadAgentSigner(agent, pass, client.provider);
+        result = await client.signTransaction(safe_tx_hash, signer);
+        auditLog({ action: 'signed', safe_tx_hash, agent, signer: signer.address });
+      }
       return { ...result, decision, reasons };
     }
 
