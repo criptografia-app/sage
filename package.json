@@ -7,6 +7,7 @@
   "scripts": {
     "test": "node --test",
     "start": "node sage.js",
+    "test": "node --test",
     "keygen": "node sage.js keygen",
     "deploy-safe": "node sage.js deploy-safe",
     "pending": "node sage.js pending"
