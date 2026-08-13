@@ -26,6 +26,20 @@ import { generateAgentKey, loadAgentSigner } from './agentKey.js';
 import { evaluate, DECISION }       from './policyEngine.js';
 import { proposeBatch, approveAll } from './batchOps.js';
 import { listContacts, resolveRecipientAsync, reverseEns } from './addressBook.js';
+import { makeAuthorizer } from './authz.js';
+
+// ── Hardware-2FA device registry ──────────────────────────────────────────────
+// Maps an operator identity (email) → their registered 2FA device. Kept in
+// authz-devices.json (gitignored — it holds public keys/addresses, no secrets,
+// but it's deployment-specific). A shared nonce store belongs here in production;
+// the in-memory default is per-process.
+function loadAuthzDevices() {
+  const p = join(__dir, 'authz-devices.json');
+  if (!existsSync(p)) return {};
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return {}; }
+}
+const deviceFor = (operator) => loadAuthzDevices()[operator] || null;
+const authorizer = makeAuthorizer(deviceFor);
 
 // ENS lives on Ethereum mainnet regardless of which chain the Safe is on, so ENS
 // resolution always goes through a mainnet provider (ENS_RPC / ETH_RPC override).
@@ -185,6 +199,7 @@ const TOOLS = [
         agent:    { type: 'string', description: 'Signing agent (default: execution)' },
         only:     { type: 'array', items: { type: 'string' }, description: 'Optional allow-list of safeTxHashes to act on (default: all pending).' },
         execute:  { type: 'boolean', description: 'Execute txs that reach threshold after signing (default true).' },
+        authorization: { type: 'object', description: 'Hardware 2FA proof (Trezor EIP-712 or YubiKey/WebAuthn) bound to this batch. Required when the operator has a registered 2FA device.' },
       },
     },
   },
@@ -331,13 +346,19 @@ async function handleTool(name, args) {
     }
 
     case 'sage_approve_all': {
-      const { agent = 'execution', only = null, execute = true, operator = process.env.SAGE_OPERATOR } = args;
+      const { agent = 'execution', only = null, execute = true, operator = process.env.SAGE_OPERATOR, authorization = null } = args;
       if (!operator) return { error: 'operator identity required — pass `operator` (authenticated owner email) or set SAGE_OPERATOR. A batch approval must be authorised by an authenticated owner.' };
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
       if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
 
+      // Hardware 2FA: enforced when the operator has a registered device or the
+      // policy demands it. Fail-closed — a registered operator can't skip 2FA by
+      // omitting the proof (missing proof fails verification and refuses the batch).
+      const require2fa = !!deviceFor(operator) || !!(cfg.policy && cfg.policy.require_2fa);
+      const gate = require2fa ? { authorize: authorizer, proof: authorization } : {};
+
       const signer = loadAgentSigner(agent, pass, client.provider);
-      const result = await approveAll(client, signer, { operator, only, execute });
+      const result = await approveAll(client, signer, { operator, only, execute, ...gate });
       auditLog({ action: 'approve_all', agent, signer: signer.address, operator, count: result.count, summary: result.summary,
                  // record the per-tx outcome so an override is always traceable to the authorising owner
                  results: result.results.map(r => ({ safeTxHash: r.safeTxHash, status: r.status, policy: r.policy, overrode_hold: r.overrode_hold })) });

@@ -151,6 +151,33 @@ Execution is **bulk but independent**: `/signer` signs every approved tx and
 executes each on its own nonce; one failure is reported and skipped, never
 reverting the others. (An atomic MultiSend batch is a roadmap option.)
 
+### Hardware 2FA on the human authorization layer
+
+The owner's authorization can be hardened with a **physical second factor** — a
+touch on a **Trezor** or a **YubiKey** — cryptographically **bound to the exact
+batch** being approved. When the operator has a registered device, `/signer`
+refuses to sign without a fresh, valid proof (fail-closed).
+
+- **Trezor / hardware wallet** — an **EIP-712** signature over the authorization
+  struct `{ operator, safeTxHashes (sorted), nonce, issuedAt, expiresAt }`,
+  verified by address recovery.
+- **YubiKey / FIDO2** — a **WebAuthn P-256 assertion** over a challenge that binds
+  the same struct, verified with Node crypto (no external dependency) — checks the
+  challenge, the user-presence flag, and the signature.
+- **Bound, fresh, one-shot** — a proof authorizes *one* batch (its exact hash set),
+  within a short **TTL**, and its **nonce is burned** on use, so it can never be
+  replayed or retargeted at a different batch.
+
+Registered devices live in `authz-devices.json` (public keys/addresses only — no
+secrets; see `authz-devices.example.json`).
+
+> **Threat model — this is an off-chain gate.** It hardens the *instruction
+> channel*: a stolen session or a spoofed instruction can't authorize without the
+> physical device. It does **not** defend a fully compromised signing-agent *host*
+> (which holds the execution key and could bypass a software gate). For that
+> stronger guarantee, register the hardware device as a **real Safe owner** so the
+> on-chain threshold itself requires the device — tracked as a roadmap option.
+
 ---
 
 ## Address book & ENS
@@ -390,6 +417,7 @@ npm test        # runs every test/*.mjs via `node --test`
 | `sdk-interop.mjs` | The CJS/ESM `.default` interop for protocol-kit / api-kit resolves to callable classes. |
 | `batch-ops.mjs` | The team money path (mock client): operator required; bulk-but-independent; HOLD override is recorded; REJECT not overridden; no double-signing; executes only at threshold. |
 | `address-book.mjs` | Recipient resolution: address / index / name / unique-prefix / ambiguity errors; ENS forward + best-effort reverse (mock provider). |
+| `authz.mjs` | Hardware 2FA with real crypto: Trezor EIP-712 (ethers) + YubiKey WebAuthn P-256 (Node crypto); batch-binding, TTL, replay, device-type + presence checks. |
 
 ---
 
@@ -406,6 +434,7 @@ npm test        # runs every test/*.mjs via `node --test`
 | AML violation | `REJECT` — the agent refuses and logs; not overridable in a bulk approval. |
 | Unauthenticated batch approval | `sage_approve_all` refuses without an operator identity; every approval (and any HOLD override) is logged against that operator. |
 | One agent compromised | Each agent runs in its own container with only its key; it can reach one signature, never the 2-of-3 threshold alone. |
+| Stolen session / spoofed "approve" instruction | Optional hardware 2FA (Trezor EIP-712 / YubiKey WebAuthn) bound to the exact batch, fresh (TTL) and one-shot (nonce burned) — `/signer` refuses without a valid proof. |
 | Funds sent to a wrong/typo'd recipient | Names/ENS are resolved and shown back; an ambiguous or unresolvable reference aborts the (whole) proposal rather than guessing. |
 
 ---
@@ -433,6 +462,9 @@ decision, backed by the audit log and the test suite above.
 - **Voice** — an opt-in toggle for spoken interaction: the wallet reads back what
   it's about to propose/sign and confirms out loud. Client-layer (TTS/STT); the
   signing engine is unchanged.
+- **Hardware device as an on-chain Safe owner** — the stronger form of the 2FA
+  above: register the Trezor/YubiKey as a real threshold signer, so no host
+  compromise can move funds without the physical device.
 - **Atomic MultiSend** — an option to bundle an approved batch into a single
   all-or-nothing Safe transaction (today: bulk-but-independent execution).
 
@@ -455,6 +487,7 @@ sage/
 ├── safeClient.js     Safe Transaction Service wrapper — perceive / sign / execute
 ├── policyEngine.js   AUTO_SIGN / HOLD_HUMAN / REJECT
 ├── batchOps.js       Team workflow: proposeBatch + approveAll (bulk, independent)
+├── authz.js          Hardware 2FA authorization — Trezor EIP-712 + YubiKey WebAuthn
 ├── addressBook.js    Recipient resolution — name / number / ENS (fwd + reverse)
 ├── address-book.json Saved recipients
 ├── agentKey.js       Encrypted agent-key management (AES-256-GCM + scrypt)

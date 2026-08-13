@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to authz-devices.json (gitignore it). Maps operator email → their registered hardware 2FA device. No secrets here — a hardware-wallet address, or a WebAuthn credential's PUBLIC key (SPKI PEM, produced by a one-time COSE→SPKI adapter at registration).",
+  "owner@yourcompany.com": {
+    "type": "hw-wallet",
+    "address": "0x0000000000000000000000000000000000000000"
+  },
+  "cfo@yourcompany.com": {
+    "type": "webauthn",
+    "publicKey": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcD...replace-with-your-credential-public-key...\n-----END PUBLIC KEY-----\n"
+  }
+}
