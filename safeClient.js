@@ -79,6 +79,32 @@ export class SAGEClient {
     this.apiKit      = new SafeApiKit({ chainId: this.chain.chainId });
   }
 
+  /**
+   * Decode a transaction proposal into SAGE's canonical detail shape — WITHOUT
+   * any network call. Pure and static so it can be shared by the dry-run
+   * simulator (which has no safeTxHash to fetch) and by getTransactionDetails,
+   * keeping the ERC-20 calldata decoding in exactly one place.
+   *
+   * @param {{ to:string, value?:string, data?:string, operation?:number, nonce?:number }} p
+   * @returns {{ to, value, data, operation, nonce, erc20 }}
+   */
+  static describeProposal({ to, value = '0', data = '0x', operation, nonce } = {}) {
+    let erc20 = null;
+    if (data && data !== '0x') {
+      try {
+        const parsed = ERC20_IFACE.parseTransaction({ data });
+        if (parsed && (parsed.name === 'transfer' || parsed.name === 'transferFrom')) {
+          erc20 = {
+            token_address:   ethers.getAddress(to),           // the ERC-20 contract
+            transfer_to:     parsed.args.to,
+            transfer_amount: parsed.args.amount.toString(),   // raw units, no decimals applied
+          };
+        }
+      } catch { /* not an ERC-20 transfer — leave erc20 null */ }
+    }
+    return { to, value, data, operation, nonce, erc20 };
+  }
+
   // ── PERCEPTION — what the wallet sees ────────────────────────────────────
 
   /** List all transactions pending signature on this Safe. */
@@ -175,31 +201,9 @@ export class SAGEClient {
   async getTransactionDetails(safeTxHash) {
     if (!this.safeAddress) throw new Error('No Safe address configured');
     const tx = await this.apiKit.getTransaction(safeTxHash);
-
-    // Decode an ERC-20 transfer out of the calldata where present.
-    let erc20 = null;
-    if (tx.data && tx.data !== '0x') {
-      try {
-        const parsed = ERC20_IFACE.parseTransaction({ data: tx.data });
-        if (parsed && (parsed.name === 'transfer' || parsed.name === 'transferFrom')) {
-          erc20 = {
-            token_address:   ethers.getAddress(tx.to),           // the ERC-20 contract
-            transfer_to:     parsed.args.to,
-            transfer_amount: parsed.args.amount.toString(),      // raw units, no decimals applied
-          };
-        }
-      } catch { /* not an ERC-20 transfer — leave erc20 null */ }
-    }
-
-    return {
-      safeTxHash,
-      to:        tx.to,
-      value:     tx.value,        // native value in wei (string)
-      data:      tx.data,
-      operation: tx.operation,
-      nonce:     tx.nonce,
-      erc20,
-    };
+    // Same canonical shape the simulator produces — ERC-20 decoding lives in
+    // describeProposal so perception (real tx) and simulation can't diverge.
+    return { safeTxHash, ...SAGEClient.describeProposal(tx) };
   }
 
   /**

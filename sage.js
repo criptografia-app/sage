@@ -407,6 +407,21 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'sage_simulate',
+    description: 'Dry-run a proposal WITHOUT submitting it: resolve the recipient, decode the calldata, and show what the policy engine WOULD decide (AUTO_SIGN / HOLD_HUMAN / REJECT) and why. Nothing is proposed or signed. Optional `assume` overlays hypothetical facts for what-if analysis.',
+    inputSchema: {
+      type: 'object',
+      required: ['to'],
+      properties: {
+        to:     { type: 'string', description: 'Destination: address, ENS name, or address-book name/#number' },
+        value:  { type: 'string', description: 'Native value in wei (default 0)' },
+        data:   { type: 'string', description: 'Calldata hex (default 0x)' },
+        agent:  { type: 'string', description: 'Agent role to evaluate as (default: execution)' },
+        assume: { type: 'object', description: 'What-if overrides for the policy context (kyc_verified, aml_clear, value_usd, is_new_address, now). Simulation only — never used for real signing.' },
+      },
+    },
+  },
+  {
     name: 'sage_inference',
     description: 'Show the inference setup: hosted (CRIPTOGRAFIA subscription) or BYOK (your own API key), which model, whether it is usable, and the models you can select.',
     inputSchema: { type: 'object', properties: {} },
@@ -427,7 +442,7 @@ async function handleTool(name, args) {
   const chain  = cfg.chain || 'polygon';
   const safe   = resolveSafeAddress(cfg);
 
-  if (!safe && !['sage_policy', 'sage_address_book', 'sage_inference', 'sage_models'].includes(name)) {
+  if (!safe && !['sage_policy', 'sage_address_book', 'sage_inference', 'sage_models', 'sage_simulate'].includes(name)) {
     return { error: 'SAGE_SAFE_ADDRESS not set. Add it to sage-config.json or export SAGE_SAFE_ADDRESS.' };
   }
 
@@ -514,6 +529,42 @@ async function handleTool(name, args) {
         ...c, ens: await reverseEns(c.address, ensProvider()),
       })));
       return { count: withEns.length, contacts: withEns };
+    }
+
+    case 'sage_simulate': {
+      const { to, value = '0', data = '0x', agent = 'execution', assume = {} } = args;
+
+      // Resolve the recipient exactly as a real proposal would, so the dry-run
+      // reflects the address funds would ACTUALLY reach — and an ambiguous or
+      // unresolvable name surfaces as an error here, not a silent wrong send.
+      let recipient;
+      try { recipient = await resolveRecipientAsync(to, { provider: ensProvider() }); }
+      catch (e) { return { error: e.message }; }
+
+      const details = SAGEClient.describeProposal({ to: recipient.address, value, data });
+
+      // Start from the SAME fail-closed trusted context the real path derives,
+      // then overlay caller `assume` for what-if analysis. Safe ONLY because
+      // simulate never signs: unlike sage_approve (which deliberately ignores
+      // caller-supplied context), the worst an assumed fact can do here is
+      // change a hypothetical decision — it can never move funds.
+      const assumed = { ...assume };
+      if (typeof assumed.now === 'string') assumed.now = new Date(assumed.now);
+      const context = { ...deriveTrustedContext(details), ...assumed };
+
+      const { decision, reasons } = evaluate(details, context, agent);
+      return {
+        simulated: true,
+        submitted: false,
+        agent,
+        recipient,
+        value_wei: value,
+        erc20:     details.erc20 || undefined,
+        decision,
+        reasons,
+        assumed:   Object.keys(assume).length ? assume : undefined,
+        note: 'Dry-run only — no transaction was proposed or signed.',
+      };
     }
 
     case 'sage_propose': {
