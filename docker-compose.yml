@@ -14,8 +14,11 @@ services:
       # Agent key passphrases — never commit these
       SAGE_PASSPHRASE_COMPLIANCE:    ${SAGE_PASSPHRASE_COMPLIANCE}
       SAGE_PASSPHRASE_EXECUTION:     ${SAGE_PASSPHRASE_EXECUTION}
-      # RPC endpoints (override if using a private node)
-      POLYGON_RPC:                   ${POLYGON_RPC:-https://polygon-rpc.com}
+      # RPC endpoints (override if using a private node). Defaults are keyless
+      # and live — NB: the old polygon-rpc.com default now returns HTTP 401
+      # ("tenant disabled"), so it must NOT be the fallback or the container
+      # starts against a dead Polygon RPC. Kept in sync with safeClient.js.
+      POLYGON_RPC:                   ${POLYGON_RPC:-https://polygon-bor-rpc.publicnode.com}
       BASE_RPC:                      ${BASE_RPC:-https://mainnet.base.org}
       ETH_RPC:                       ${ETH_RPC:-https://eth.llamarpc.com}
       # Notification bridges (optional — for HOLD_HUMAN alerts)
