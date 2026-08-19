@@ -133,6 +133,26 @@ await approveAll(mockClient([]), SIGNER, {}).then(
   check('only-list restricts the batch to the named hash', res.count === 1 && res.results[0].safeTxHash === '0xH');
 }
 
+// ── hardware-2FA gate: a failed proof refuses the WHOLE batch (nothing signed) ─
+{
+  const client = mockClient([tx('0xJ'), tx('0xK')]);
+  const authorize = async () => { throw new Error('bad touch'); };
+  const res = await approveAll(client, SIGNER, { operator: 'owner@corp.com', authorize, proof: null });
+  check('failed 2FA → authorized:false, nothing signed', res.authorized === false && client.calls.signed.length === 0);
+  check('failed 2FA → whole batch refused in summary', res.summary.refused === 2 && res.count === 0);
+}
+
+// ── hardware-2FA gate: a valid proof lets the batch proceed ───────────────────
+{
+  const client = mockClient([tx('0xL')]);
+  let sawArgs = null;
+  const authorize = async (operator, hashes, proof) => { sawArgs = { operator, hashes, proof }; /* ok */ };
+  const res = await approveAll(client, SIGNER, { operator: 'owner@corp.com', authorize, proof: { type: 'hw-wallet' } });
+  check('valid 2FA → batch proceeds (executed)', res.results[0].status === 'executed');
+  check('2FA gate receives operator + the batch hashes + proof',
+    sawArgs.operator === 'owner@corp.com' && sawArgs.hashes[0] === '0xL' && sawArgs.proof.type === 'hw-wallet');
+}
+
 // ── proposeBatch: proposes each, survives a bad entry ─────────────────────────
 {
   const proposer = {

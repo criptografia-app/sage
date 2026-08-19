@@ -78,13 +78,17 @@ export async function proposeBatch(client, signer, txs, opts = {}) {
  * @param {object} client - SAGEClient (needs getPendingTransactions,
  *                          getTransactionDetails, signTransaction, executeTransaction)
  * @param {object} signer - the signing agent's ethers.Wallet
- * @param {{operator: string, execute?: boolean, only?: string[]}} opts
- *        operator - REQUIRED authenticated owner identity (email); authorises the batch
- *        execute  - execute txs that reach threshold after signing (default true)
- *        only     - optional allow-list of safeTxHashes to act on (default: all pending)
+ * @param {{operator: string, execute?: boolean, only?: string[], authorize?: Function, proof?: object}} opts
+ *        operator  - REQUIRED authenticated owner identity (email); authorises the batch
+ *        execute   - execute txs that reach threshold after signing (default true)
+ *        only      - optional allow-list of safeTxHashes to act on (default: all pending)
+ *        authorize - optional hardware-2FA gate `(operator, safeTxHashes, proof) => Promise<void>`
+ *                    that THROWS to reject. When present, a valid proof is required and the
+ *                    WHOLE batch is refused (nothing signed) if it fails — fail-closed.
+ *        proof     - the hardware-2FA proof (Trezor / YubiKey) passed to `authorize`
  */
 export async function approveAll(client, signer, opts = {}) {
-  const { operator, execute = true, only = null } = opts;
+  const { operator, execute = true, only = null, authorize = null, proof = null } = opts;
   if (!operator) {
     throw new Error('approveAll: `operator` identity required — a batch approval must be authorised by an authenticated owner');
   }
@@ -93,6 +97,23 @@ export async function approveAll(client, signer, opts = {}) {
   if (Array.isArray(only) && only.length > 0) {
     const set = new Set(only.map(h => h.toLowerCase()));
     pending = pending.filter(tx => set.has(tx.safeTxHash.toLowerCase()));
+  }
+
+  // Hardware 2FA gate: verify a device proof bound to THIS exact batch before
+  // signing anything. A failure refuses the whole batch — nothing is signed.
+  if (authorize) {
+    const hashes = pending.map(tx => tx.safeTxHash);
+    try {
+      await authorize(operator, hashes, proof);
+    } catch (e) {
+      return {
+        operator,
+        threshold_model: '2-agents-plus-operator-ok',
+        authorized: false,
+        error: `hardware 2FA authorization failed: ${e.message}`,
+        count: 0, summary: { refused: pending.length }, results: [],
+      };
+    }
   }
 
   const results = [];

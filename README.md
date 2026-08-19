@@ -151,6 +151,33 @@ Execution is **bulk but independent**: `/signer` signs every approved tx and
 executes each on its own nonce; one failure is reported and skipped, never
 reverting the others. (An atomic MultiSend batch is a roadmap option.)
 
+### Hardware 2FA on the human authorization layer
+
+The owner's authorization can be hardened with a **physical second factor** — a
+touch on a **Trezor** or a **YubiKey** — cryptographically **bound to the exact
+batch** being approved. When the operator has a registered device, `/signer`
+refuses to sign without a fresh, valid proof (fail-closed).
+
+- **Trezor / hardware wallet** — an **EIP-712** signature over the authorization
+  struct `{ operator, safeTxHashes (sorted), nonce, issuedAt, expiresAt }`,
+  verified by address recovery.
+- **YubiKey / FIDO2** — a **WebAuthn P-256 assertion** over a challenge that binds
+  the same struct, verified with Node crypto (no external dependency) — checks the
+  challenge, the user-presence flag, and the signature.
+- **Bound, fresh, one-shot** — a proof authorizes *one* batch (its exact hash set),
+  within a short **TTL**, and its **nonce is burned** on use, so it can never be
+  replayed or retargeted at a different batch.
+
+Registered devices live in `authz-devices.json` (public keys/addresses only — no
+secrets; see `authz-devices.example.json`).
+
+> **Threat model — this is an off-chain gate.** It hardens the *instruction
+> channel*: a stolen session or a spoofed instruction can't authorize without the
+> physical device. It does **not** defend a fully compromised signing-agent *host*
+> (which holds the execution key and could bypass a software gate). For that
+> stronger guarantee, register the hardware device as a **real Safe owner** so the
+> on-chain threshold itself requires the device — tracked as a roadmap option.
+
 ---
 
 ## Address book & ENS
@@ -390,6 +417,75 @@ npm test        # runs every test/*.mjs via `node --test`
 | `sdk-interop.mjs` | The CJS/ESM `.default` interop for protocol-kit / api-kit resolves to callable classes. |
 | `batch-ops.mjs` | The team money path (mock client): operator required; bulk-but-independent; HOLD override is recorded; REJECT not overridden; no double-signing; executes only at threshold. |
 | `address-book.mjs` | Recipient resolution: address / index / name / unique-prefix / ambiguity errors; ENS forward + best-effort reverse (mock provider). |
+| `authz.mjs` | Hardware 2FA with real crypto: Trezor EIP-712 (ethers) + YubiKey WebAuthn P-256 (Node crypto); batch-binding, TTL, replay, device-type + presence checks. |
+| `remote-signer.mjs` | Keyless signing: valid owner sig from a `signDigest`-only backend; v-normalization; refuses a signature that doesn't recover to the owner; HTTP vault backend (mock fetch) incl. wrong-key + error paths. |
+
+---
+
+## Keyless signing (Warden / Vault)
+
+An agent never has to hold a private key. When a signature is needed, the agent
+computes the canonical Safe **EIP-712 hash locally**, then makes a **request to a
+vault** (Warden / HashiCorp Vault Transit / a KMS) that holds the key and returns
+**only a signature**. The key never enters the agent process.
+
+- **`signer.js`** — `RemoteSigner` over a pluggable backend that exposes only
+  `signDigest(digest) → { r, s }`. Backends: `local` (in-memory key — dev / SAGE
+  free tier only), and `http` / `warden` / `vault` (generic `POST { keyRef, digest }
+  → { r, s }`).
+- **Verified before submit** — `RemoteSigner` **refuses** any returned signature
+  that does not recover to the expected owner address, so a wrong or compromised
+  vault key can never be silently submitted.
+- **`safeClient.signTransactionKeyless()`** — derives the exact canonical hash
+  (via protocol-kit's pure `generateTypedData`, identical to the
+  hash-conformance vector), checks it against the requested `safeTxHash`, then
+  delegates signing to the vault.
+
+This works in **both SAGE and PRIVATE**. Configure it per agent under `keys` in
+`sage-config.json` — with no `keys` entry, SAGE uses the local encrypted key as
+before (nothing changes):
+
+```json
+{
+  "keys": {
+    "execution": {
+      "backend":  "warden",
+      "address":  "0xAgentOwnerAddress",
+      "endpoint": "https://your-vault/sign",
+      "keyRef":   "agents/execution",
+      "headers":  { "authorization": "Bearer ${VAULT_TOKEN}" }
+    }
+  }
+}
+```
+
+`endpoint` / `keyRef` / header values support `${ENV}` placeholders. In SAGE free,
+omit `keys` and keep the local encrypted keystore; in **PRIVATE**, every agent is
+keyless by policy (see `PRIVATE/ARCHITECTURE-secrets.md`).
+
+---
+
+## Inference & pricing (BYOK or hosted)
+
+SAGE is **MCP-first** — every capability is an agent tool — and the inference that
+drives the agents is a configurable layer (`inference.js`), so SAGE stays free and
+sovereign while offering a paid convenience path:
+
+- **BYOK (free)** — bring your own provider API key (`anthropic` / `openai` /
+  `openrouter`); SAGE surfaces the **selectable models** for that key so you pick
+  one. Nothing routes through us; SAGE stays sovereign.
+- **Hosted ($/mo)** — CRIPTOGRAFIA sells the inference on a subscription; requests
+  route through the SAGE gateway, gated by a license token.
+
+MCP tools: `sage_inference` (current mode / model / usable?) and `sage_models`
+(the menu for a provider). Config lives under `inference` in `sage-config.json`;
+env overrides: `SAGE_INFERENCE_MODE`, `SAGE_INFERENCE_PROVIDER`,
+`SAGE_INFERENCE_MODEL`, the provider key env, and `SAGE_LICENSE`.
+
+> **CRIPTOGRAFIA PRIVATE** — the full agentic private-bank / wealth-management
+> stack — is a *separate, premium* product (bespoke onboarding, compliance,
+> reporting, recovery, fiat bridges, TEE, dedicated support). SAGE free is the
+> sovereign funnel; PRIVATE is the white-glove tier.
 
 ---
 
@@ -401,11 +497,13 @@ npm test        # runs every test/*.mjs via `node --test`
 | Policy bypass via crafted args | Decisions derive from the real on-chain pending tx; caller context is ignored. |
 | Wrong-tx signing | `signTransaction` re-derives the EIP-712 hash and refuses if it ≠ the requested hash. |
 | Agent acting alone | Threshold 2-of-3 — an agent signature alone is never enough. |
-| Server compromise | Agent keys are AES-256-GCM encrypted at rest; passphrase never stored on disk. |
+| Server compromise | Agent keys are AES-256-GCM encrypted at rest; passphrase never stored on disk. **Keyless mode:** the key can live entirely in a vault (Warden / Vault) so it never enters the agent — a popped host can request signatures (still policy + 2FA gated) but cannot steal the key. |
+| Wrong / compromised vault key | `RemoteSigner` verifies the returned signature recovers to the expected owner and refuses otherwise. |
 | Auto-signing on unverified facts | Fail-closed: KYC/AML default un-verified and unknown value holds — nothing auto-signs until compliance is wired. |
 | AML violation | `REJECT` — the agent refuses and logs; not overridable in a bulk approval. |
 | Unauthenticated batch approval | `sage_approve_all` refuses without an operator identity; every approval (and any HOLD override) is logged against that operator. |
 | One agent compromised | Each agent runs in its own container with only its key; it can reach one signature, never the 2-of-3 threshold alone. |
+| Stolen session / spoofed "approve" instruction | Optional hardware 2FA (Trezor EIP-712 / YubiKey WebAuthn) bound to the exact batch, fresh (TTL) and one-shot (nonce burned) — `/signer` refuses without a valid proof. |
 | Funds sent to a wrong/typo'd recipient | Names/ENS are resolved and shown back; an ambiguous or unresolvable reference aborts the (whole) proposal rather than guessing. |
 
 ---
@@ -433,6 +531,9 @@ decision, backed by the audit log and the test suite above.
 - **Voice** — an opt-in toggle for spoken interaction: the wallet reads back what
   it's about to propose/sign and confirms out loud. Client-layer (TTS/STT); the
   signing engine is unchanged.
+- **Hardware device as an on-chain Safe owner** — the stronger form of the 2FA
+  above: register the Trezor/YubiKey as a real threshold signer, so no host
+  compromise can move funds without the physical device.
 - **Atomic MultiSend** — an option to bundle an approved batch into a single
   all-or-nothing Safe transaction (today: bulk-but-independent execution).
 
@@ -455,6 +556,8 @@ sage/
 ├── safeClient.js     Safe Transaction Service wrapper — perceive / sign / execute
 ├── policyEngine.js   AUTO_SIGN / HOLD_HUMAN / REJECT
 ├── batchOps.js       Team workflow: proposeBatch + approveAll (bulk, independent)
+├── authz.js          Hardware 2FA authorization — Trezor EIP-712 + YubiKey WebAuthn
+├── signer.js         Keyless remote signing — RemoteSigner over Warden / Vault backends
 ├── addressBook.js    Recipient resolution — name / number / ENS (fwd + reverse)
 ├── address-book.json Saved recipients
 ├── agentKey.js       Encrypted agent-key management (AES-256-GCM + scrypt)

@@ -10,7 +10,8 @@
  * and communicates via MCP with the operator.
  *
  * Usage:
- *   node sage.js                  — start MCP server
+ *   node sage.js                  — start MCP server (stdio)
+ *   node sage.js daemon           — 24/7 monitor + HTTP /health (container entrypoint)
  *   node sage.js keygen <name>    — generate encrypted agent key
  *   node sage.js pending          — list pending Safe transactions
  *   node sage.js info             — show Safe state summary
@@ -26,6 +27,47 @@ import { generateAgentKey, loadAgentSigner } from './agentKey.js';
 import { evaluate, DECISION }       from './policyEngine.js';
 import { proposeBatch, approveAll } from './batchOps.js';
 import { listContacts, resolveRecipientAsync, reverseEns } from './addressBook.js';
+import { makeAuthorizer } from './authz.js';
+import { inferenceStatus, listModels } from './inference.js';
+import { makeSigner } from './signer.js';
+
+// ── Keyless signing resolver ──────────────────────────────────────────────────
+// When an agent is configured with a remote key backend (Warden / Vault), no
+// private key ever lives in this process — signing is a request to the vault.
+// Config lives under `keys` in sage-config.json, e.g.
+//   "keys": { "execution": { "backend": "warden", "address": "0x..",
+//                            "endpoint": "https://vault/sign", "keyRef": "agent/exec" } }
+// keyRef/endpoint may use ${ENV} placeholders resolved from the environment.
+function resolveEnvPlaceholders(v) {
+  return typeof v === 'string'
+    ? v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k) => process.env[k] ?? '')
+    : v;
+}
+function keylessSignerFor(agent, cfg) {
+  const spec = cfg.keys && cfg.keys[agent];
+  if (!spec || spec.backend === 'local') return null;   // no remote backend → use local encrypted key
+  const headers = spec.headers ? Object.fromEntries(
+    Object.entries(spec.headers).map(([k, v]) => [k, resolveEnvPlaceholders(v)])) : {};
+  return makeSigner({
+    ...spec,
+    endpoint: resolveEnvPlaceholders(spec.endpoint),
+    keyRef:   resolveEnvPlaceholders(spec.keyRef),
+    headers,
+  });
+}
+
+// ── Hardware-2FA device registry ──────────────────────────────────────────────
+// Maps an operator identity (email) → their registered 2FA device. Kept in
+// authz-devices.json (gitignored — it holds public keys/addresses, no secrets,
+// but it's deployment-specific). A shared nonce store belongs here in production;
+// the in-memory default is per-process.
+function loadAuthzDevices() {
+  const p = join(__dir, 'authz-devices.json');
+  if (!existsSync(p)) return {};
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return {}; }
+}
+const deviceFor = (operator) => loadAuthzDevices()[operator] || null;
+const authorizer = makeAuthorizer(deviceFor);
 
 // ENS lives on Ethereum mainnet regardless of which chain the Safe is on, so ENS
 // resolution always goes through a mainnet provider (ENS_RPC / ETH_RPC override).
@@ -101,6 +143,166 @@ export function deriveTrustedContext(details) {
     // value_usd deliberately omitted: no price oracle in-scope, and we must not
     // synthesise a value that could let a large transfer slip under a limit.
   };
+}
+
+// ── Daemon: 24/7 pending-tx monitor + HTTP health (CRIPTO-182 / SAGE-6) ───────
+// The daemon is the long-lived process the Docker image runs. It does two jobs:
+//   1. Serves GET /health so the container is observable and the Dockerfile
+//      healthcheck passes — and, critically, so the process STAYS ALIVE instead
+//      of the stdio-EOF boot-loop that a bare MCP server produced in a container.
+//   2. Polls the Safe Transaction Service on an interval, runs each pending tx
+//      through the policy engine, and records the decision to the audit log.
+//
+// It deliberately does NOT sign. SAGE is fail-closed (see deriveTrustedContext):
+// until compliance + a price oracle are wired, every real tx evaluates to
+// HOLD_HUMAN, and the daemon's role is to surface that for a human — never to
+// auto-sign on facts it cannot verify.
+import http from 'http';
+
+const DAEMON_STATE = {
+  startedAt:    Date.now(),
+  lastPollAt:   null,
+  lastError:    null,
+  pendingCount: null,
+  polls:        0,
+  decisions:    {},          // decision → count, for the LAST poll only
+  notified:     new Set(),   // safeTxHashes we've already alerted on (dedupe)
+};
+
+function healthPayload() {
+  const status = DAEMON_STATE.lastPollAt === null
+    ? 'starting'
+    : (DAEMON_STATE.lastError ? 'degraded' : 'ok');
+  return {
+    status,
+    wallet:        resolveSafeAddress(),
+    uptime_s:      Math.round((Date.now() - DAEMON_STATE.startedAt) / 1000),
+    last_poll_at:  DAEMON_STATE.lastPollAt ? new Date(DAEMON_STATE.lastPollAt).toISOString() : null,
+    pending_count: DAEMON_STATE.pendingCount,
+    polls:         DAEMON_STATE.polls,
+    decisions:     DAEMON_STATE.decisions,
+    last_error:    DAEMON_STATE.lastError,
+  };
+}
+
+// Best-effort HOLD_HUMAN alert. Fires only if a notify bridge is configured
+// (WHATSAPP_BRIDGE_URL — see docker-compose.yml) and only once per tx. A dead
+// or slow bridge must never wedge the monitor loop, so it's timeboxed and any
+// failure is swallowed after an audit line.
+async function notifyHold(tx, reasons) {
+  const url = process.env.WHATSAPP_BRIDGE_URL;
+  if (!url || DAEMON_STATE.notified.has(tx.safeTxHash)) return;
+  DAEMON_STATE.notified.add(tx.safeTxHash);
+  const phone = process.env.NOTIFY_PHONE;
+  const text  = `SAGE: transaction ${tx.safeTxHash} held for your co-signature.\n` +
+                `to: ${tx.to} · value: ${tx.valuEth ?? tx.value} · ${reasons.join('; ')}`;
+  try {
+    const ctl = new AbortController();
+    const t   = setTimeout(() => ctl.abort(), 5000);
+    const res = await fetch(url, {
+      method:  'POST',
+      signal:  ctl.signal,
+      headers: {
+        'content-type': 'application/json',
+        ...(process.env.WHATSAPP_BRIDGE_SECRET ? { 'x-bridge-secret': process.env.WHATSAPP_BRIDGE_SECRET } : {}),
+      },
+      body: JSON.stringify({ to: phone, message: text }),
+    });
+    clearTimeout(t);
+    auditLog({ action: 'daemon_notify', safe_tx_hash: tx.safeTxHash, ok: res.ok, http: res.status });
+  } catch (e) {
+    auditLog({ action: 'daemon_notify_failed', safe_tx_hash: tx.safeTxHash, error: e.message });
+  }
+}
+
+/**
+ * Run one monitoring pass: list pending txs, evaluate each under policy, log the
+ * decision, and alert on newly-held txs. Exported so it can be driven
+ * deterministically from a test with an injected client. Returns the count.
+ */
+export async function pollPending(client) {
+  const pending = await client.getPendingTransactions();
+  DAEMON_STATE.pendingCount = pending.length;
+  const tally = {};
+
+  for (const tx of pending) {
+    try {
+      const details = await client.getTransactionDetails(tx.safeTxHash);
+      const context = deriveTrustedContext(details);
+      const { decision, reasons } = evaluate(details, context, 'execution');
+      tally[decision] = (tally[decision] || 0) + 1;
+      auditLog({ action: 'daemon_eval', safe_tx_hash: tx.safeTxHash, decision, reasons });
+      if (decision === DECISION.HOLD_HUMAN) await notifyHold(tx, reasons);
+    } catch (e) {
+      // One bad tx (e.g. a details fetch that 404s mid-poll) must not sink the
+      // rest of the pass — log and keep going.
+      tally.ERROR = (tally.ERROR || 0) + 1;
+      auditLog({ action: 'daemon_eval_failed', safe_tx_hash: tx.safeTxHash, error: e.message });
+    }
+  }
+
+  DAEMON_STATE.decisions = tally;
+  return pending.length;
+}
+
+function startDaemon() {
+  const cfg  = loadConfig();
+  const safe = resolveSafeAddress(cfg);
+  const port = Number(process.env.SAGE_HEALTH_PORT || 3000);
+  const intervalMs = Math.max(1000, Number(process.env.SAGE_POLL_INTERVAL_MS || 30000));
+
+  // Health server. Always returns 200 while the process is up: liveness here
+  // means "the daemon is running and serving" — exactly the signal whose absence
+  // caused the boot-loop. Health detail (starting/ok/degraded, last error) lives
+  // in the body for observability, so a transient RPC blip doesn't flap the
+  // container unhealthy.
+  const server = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(healthPayload()));
+    } else {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    }
+  });
+  server.listen(port, () => console.error(`[SAGE] daemon: health on :${port}/health`));
+
+  let client = null;
+  if (safe) {
+    client = new SAGEClient(cfg.chain || 'polygon', safe);
+    console.error(`[SAGE] daemon: monitoring Safe ${safe} on ${cfg.chain || 'polygon'} every ${intervalMs}ms`);
+  } else {
+    console.error('[SAGE] daemon: no Safe configured — health server up, monitor idle until SAGE_SAFE_ADDRESS is set.');
+  }
+
+  let running = false;   // guard against overlapping ticks on a slow RPC
+  const tick = async () => {
+    if (!client || running) return;
+    running = true;
+    try {
+      await pollPending(client);
+      DAEMON_STATE.lastError = null;
+    } catch (e) {
+      DAEMON_STATE.lastError = e.message;
+      console.error('[SAGE] daemon: poll error —', e.message);
+    } finally {
+      DAEMON_STATE.lastPollAt = Date.now();
+      DAEMON_STATE.polls++;
+      running = false;
+    }
+  };
+
+  tick();
+  const timer = setInterval(tick, intervalMs);
+
+  const shutdown = sig => {
+    console.error(`[SAGE] daemon: ${sig} received, shutting down.`);
+    clearInterval(timer);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();   // hard stop if close hangs
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 }
 
 // ── MCP Server — JSON-RPC over stdio ────────────────────────────────────────
@@ -185,6 +387,7 @@ const TOOLS = [
         agent:    { type: 'string', description: 'Signing agent (default: execution)' },
         only:     { type: 'array', items: { type: 'string' }, description: 'Optional allow-list of safeTxHashes to act on (default: all pending).' },
         execute:  { type: 'boolean', description: 'Execute txs that reach threshold after signing (default true).' },
+        authorization: { type: 'object', description: 'Hardware 2FA proof (Trezor EIP-712 or YubiKey/WebAuthn) bound to this batch. Required when the operator has a registered 2FA device.' },
       },
     },
   },
@@ -203,6 +406,19 @@ const TOOLS = [
     description: 'Read the current signing policy — what the agents auto-sign vs what requires human approval.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'sage_inference',
+    description: 'Show the inference setup: hosted (CRIPTOGRAFIA subscription) or BYOK (your own API key), which model, whether it is usable, and the models you can select.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'sage_models',
+    description: 'List the models available for an inference provider (anthropic / openai / openrouter) — the menu to pick from once a key is entered.',
+    inputSchema: {
+      type: 'object',
+      properties: { provider: { type: 'string', description: 'anthropic | openai | openrouter (default: the configured provider)' } },
+    },
+  },
 ];
 
 // ── Tool handlers ────────────────────────────────────────────────────────────
@@ -211,7 +427,7 @@ async function handleTool(name, args) {
   const chain  = cfg.chain || 'polygon';
   const safe   = resolveSafeAddress(cfg);
 
-  if (!safe && !['sage_policy', 'sage_address_book'].includes(name)) {
+  if (!safe && !['sage_policy', 'sage_address_book', 'sage_inference', 'sage_models'].includes(name)) {
     return { error: 'SAGE_SAFE_ADDRESS not set. Add it to sage-config.json or export SAGE_SAFE_ADDRESS.' };
   }
 
@@ -250,8 +466,12 @@ async function handleTool(name, args) {
 
     case 'sage_approve': {
       const { safe_tx_hash, agent = 'execution' } = args;
+
+      // Keyless path: if this agent has a remote key backend (Warden / Vault),
+      // no private key lives here — we don't need a passphrase to unlock one.
+      const keyless = keylessSignerFor(agent, cfg);
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
-      if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
+      if (!keyless && !pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key (or configure keys.${agent} for a remote vault backend).` };
 
       // SECURITY: never gate auto-signing on caller-supplied context. Any
       // kyc_verified / aml_clear / value_usd the caller passes in `args` is
@@ -272,10 +492,16 @@ async function handleTool(name, args) {
         return { signed: false, decision, reasons, message: 'Transaction held — human co-signature required.' };
       }
 
-      // Auto-sign
-      const signer = loadAgentSigner(agent, pass, client.provider);
-      const result = await client.signTransaction(safe_tx_hash, signer);
-      auditLog({ action: 'signed', safe_tx_hash, agent, signer: signer.address });
+      // Auto-sign. Keyless (vault) if configured, else the local encrypted key.
+      let result;
+      if (keyless) {
+        result = await client.signTransactionKeyless(safe_tx_hash, keyless);
+        auditLog({ action: 'signed', safe_tx_hash, agent, signer: keyless.getAddress(), keyless: true });
+      } else {
+        const signer = loadAgentSigner(agent, pass, client.provider);
+        result = await client.signTransaction(safe_tx_hash, signer);
+        auditLog({ action: 'signed', safe_tx_hash, agent, signer: signer.address });
+      }
       return { ...result, decision, reasons };
     }
 
@@ -331,13 +557,19 @@ async function handleTool(name, args) {
     }
 
     case 'sage_approve_all': {
-      const { agent = 'execution', only = null, execute = true, operator = process.env.SAGE_OPERATOR } = args;
+      const { agent = 'execution', only = null, execute = true, operator = process.env.SAGE_OPERATOR, authorization = null } = args;
       if (!operator) return { error: 'operator identity required — pass `operator` (authenticated owner email) or set SAGE_OPERATOR. A batch approval must be authorised by an authenticated owner.' };
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
       if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
 
+      // Hardware 2FA: enforced when the operator has a registered device or the
+      // policy demands it. Fail-closed — a registered operator can't skip 2FA by
+      // omitting the proof (missing proof fails verification and refuses the batch).
+      const require2fa = !!deviceFor(operator) || !!(cfg.policy && cfg.policy.require_2fa);
+      const gate = require2fa ? { authorize: authorizer, proof: authorization } : {};
+
       const signer = loadAgentSigner(agent, pass, client.provider);
-      const result = await approveAll(client, signer, { operator, only, execute });
+      const result = await approveAll(client, signer, { operator, only, execute, ...gate });
       auditLog({ action: 'approve_all', agent, signer: signer.address, operator, count: result.count, summary: result.summary,
                  // record the per-tx outcome so an override is always traceable to the authorising owner
                  results: result.results.map(r => ({ safeTxHash: r.safeTxHash, status: r.status, policy: r.policy, overrode_hold: r.overrode_hold })) });
@@ -353,6 +585,16 @@ async function handleTool(name, args) {
     case 'sage_policy': {
       const cfg = loadConfig();
       return cfg.policy || { message: 'No policy configured. Add "policy" to sage-config.json.' };
+    }
+
+    case 'sage_inference': {
+      return inferenceStatus(loadConfig(), process.env);
+    }
+
+    case 'sage_models': {
+      const provider = args.provider || loadConfig().inference?.provider || process.env.SAGE_INFERENCE_PROVIDER || 'anthropic';
+      try { return { provider, models: listModels(provider) }; }
+      catch (e) { return { error: e.message }; }
     }
 
     default:
@@ -417,6 +659,17 @@ async function runCLI(argv) {
       operator: process.env.SAGE_OPERATOR,
     });
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  // 24/7 monitor daemon (CRIPTO-182 / SAGE-6). This is what the Docker image
+  // runs (`CMD ["node","sage.js","daemon"]`). It is NOT the stdio MCP server —
+  // a stdio server has no client on a container's stdin, hits EOF, exits 0, and
+  // `restart: unless-stopped` turns that into a boot-loop (the symptom that was
+  // spamming "MCP server running on stdio"). The daemon is long-lived: it serves
+  // an HTTP /health endpoint (the Dockerfile healthcheck) and polls pending txs.
+  if (cmd === 'daemon') {
+    startDaemon();
     return;
   }
 
