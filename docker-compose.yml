@@ -60,6 +60,109 @@ services:
   #   networks:
   #     - criptografia_net
 
+  # ── SAGE publisher — proposal agent (HTTP) ──────────────────────────────────
+  # `sage.js serve` scoped to the publisher role. Proposes; never executes.
+  sage-publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: criptografia-sage-publisher
+    restart: unless-stopped
+    command: ["node", "sage.js", "serve"]
+    environment:
+      NODE_ENV:  production
+      SAGE_ROLE: publisher
+      SAGE_PORT: 3010
+      # POC points at the Amoy Safe WITHOUT editing the shared config's chain.
+      SAGE_CHAIN:        ${SAGE_CHAIN:-amoy}
+      SAGE_SAFE_ADDRESS: ${POC_SAFE_ADDRESS:-}
+      AMOY_RPC:          ${AMOY_RPC:-https://polygon-amoy-bor-rpc.publicnode.com}
+      # Unlocks the compliance key for proposing. Empty → propose returns a hint.
+      SAGE_PASSPHRASE_COMPLIANCE: ${SAGE_PASSPHRASE_COMPLIANCE:-}
+      # BYOK inference for the /chat endpoint. Empty → /chat asks for a key.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      # Encrypted agent key, mounted read-only at RUNTIME (never baked in — see
+      # .dockerignore). The code reads keys from /app.
+      - ./.sage-key-compliance.enc:/app/.sage-key-compliance.enc:ro
+    networks:
+      - criptografia_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3010/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── SAGE signer — signing agent (HTTP) ──────────────────────────────────────
+  # `sage.js serve` scoped to the signer role. Co-signs/executes on operator
+  # instruction, only within policy.
+  sage-signer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: criptografia-sage-signer
+    restart: unless-stopped
+    command: ["node", "sage.js", "serve"]
+    environment:
+      NODE_ENV:  production
+      SAGE_ROLE: signer
+      SAGE_PORT: 3011
+      SAGE_CHAIN:        ${SAGE_CHAIN:-amoy}
+      SAGE_SAFE_ADDRESS: ${POC_SAFE_ADDRESS:-}
+      AMOY_RPC:          ${AMOY_RPC:-https://polygon-amoy-bor-rpc.publicnode.com}
+      SAGE_PASSPHRASE_EXECUTION: ${SAGE_PASSPHRASE_EXECUTION:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./.sage-key-execution.enc:/app/.sage-key-execution.enc:ro
+    networks:
+      - criptografia_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3011/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── SAGE web — Privy social login → chat to the agents ──────────────────────
+  sage-web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* must be present at BUILD time to reach the browser bundle.
+        NEXT_PUBLIC_PRIVY_APP_ID: ${NEXT_PUBLIC_PRIVY_APP_ID:-}
+    container_name: criptografia-sage-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # Next API routes proxy to these in-network service names (server-side).
+      PUBLISHER_URL: http://criptografia-sage-publisher:3010
+      SIGNER_URL:    http://criptografia-sage-signer:3011
+      # Privy social login. The public app id reaches the browser; the secret
+      # stays server-side to verify the login token before trusting `operator`.
+      NEXT_PUBLIC_PRIVY_APP_ID: ${NEXT_PUBLIC_PRIVY_APP_ID:-}
+      PRIVY_APP_ID:             ${PRIVY_APP_ID:-}
+      PRIVY_APP_SECRET:         ${PRIVY_APP_SECRET:-}
+    ports:
+      - "8080:3000"
+    depends_on:
+      - sage-publisher
+      - sage-signer
+    networks:
+      - criptografia_net
+
+  # ── safe-cli — Safe maintenance/migration tool (all-Docker, on demand) ──────
+  # NOT part of the running stack (profile-gated). Use it to inspect/migrate a
+  # Safe's mastercopy version:
+  #   docker compose run --rm safe-cli \
+  #     0xe601D7B4103FD508dA521A25D7639F085448196d https://polygon-bor-rpc.publicnode.com
+  safe-cli:
+    image: safeglobal/safe-cli
+    profiles: ["tools"]
+    stdin_open: true
+    tty: true
+    networks:
+      - criptografia_net
+
 networks:
   criptografia_net:
     # Attach to the existing CRIPTOGRAFIA network if running alongside the P2P stack
