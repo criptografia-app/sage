@@ -23,7 +23,7 @@ private agentic crypto bank.** Same principles, same fail-closed core, different
 |---|---|---|
 | **What it is** | An agentic wallet — two AI co-signers on your Safe | A private bank — a team of specialist desks on your multisig |
 | **Agents** | Proposal + Signer | Concierge, Treasury, Compliance, Bridge, Proposal, Watchtower, Signer, Reporting, Recovery, Legacy, Gas Optimizer, Audit |
-| **Chains** | EVM (Safe{Core}) | EVM and Bitcoin |
+| **Chains** | EVM (Safe{Core}) | Ethereum and any EVM chain or fork, plus Bitcoin |
 | **Keys** | Local encrypted keystore, or keyless | Keyless only |
 | **For** | Individuals and builders | Families, family offices, companies |
 | **Price** | Free | Bespoke onboarding and support |
