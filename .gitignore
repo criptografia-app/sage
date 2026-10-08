@@ -14,3 +14,20 @@ PRIVATE/
 
 # Hardware-2FA device registry (public keys/addresses, but deployment-specific)
 authz-devices.json
+
+# Local-only compose overrides (port publishing for testing)
+docker-compose.override.yml
+
+# PRIVATE Claude skills — proprietary personas symlinked from PRIVATE/; local-only, never commit.
+.claude/skills/concierge/
+.claude/skills/compliance/
+.claude/skills/treasury/
+.claude/skills/watchtower/
+.claude/skills/reporting/
+.claude/skills/recovery/
+.claude/skills/bridge/
+.claude/skills/gas-optimizer/
+.claude/skills/PRIVATE/
+
+# Local editor session state
+.chan/
