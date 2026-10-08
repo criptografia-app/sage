@@ -14,6 +14,25 @@ alone — the Safe's threshold does.
 
 ---
 
+## Two editions: SAGE and CRIPTOGRAFIA PRIVATE
+
+SAGE is the **free, smaller edition** of the engine behind **CRIPTOGRAFIA PRIVATE — the
+private agentic crypto bank.** Same principles, same fail-closed core, different scope:
+
+| | **SAGE** (this repo) | **CRIPTOGRAFIA PRIVATE** |
+|---|---|---|
+| **What it is** | An agentic wallet — two AI co-signers on your Safe | A private bank — a team of specialist desks on your multisig |
+| **Agents** | Proposal + Signer | Concierge, Treasury, Compliance, Bridge, Proposal, Watchtower, Signer, Reporting, Recovery, Legacy, Gas Optimizer, Audit |
+| **Chains** | EVM (Safe{Core}) | EVM and Bitcoin |
+| **Keys** | Local encrypted keystore, or keyless | Keyless only |
+| **For** | Individuals and builders | Families, family offices, companies |
+| **Price** | Free | Bespoke onboarding and support |
+
+Everything SAGE does, PRIVATE does on top of it — so you can inspect the foundation
+before you trust the institution.
+
+---
+
 ## The one thing to understand first: SAGE is fail-closed
 
 Out of the box, **SAGE auto-signs nothing.** Every pending transaction is held for a
