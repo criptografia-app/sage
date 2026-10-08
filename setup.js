@@ -1,5 +1,33 @@
 #!/usr/bin/env node
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  SAGE — the agentic wallet for Safe multisig.
+ *  A product of CRIPTOGRAFIA CAPITAL, and the foundation of
+ *  CRIPTOGRAFIA PRIVATE (Non-Custodial Agentic Wealth Management).
+ *
+ *  Copyright (c) 2026 CRIPTOGRAFIA Capital.
+ *  Released under the MIT License. Free, sovereign, bring-your-own-key.
+ *
+ *  NON-CUSTODIAL. CRIPTOGRAFIA Capital never takes custody of your assets.
+ *  Funds are held solely by your own Safe multisig smart contract. Agent keys
+ *  are yours: encrypted at rest locally, or held in a vault you control. You
+ *  can always recover and operate your Safe with no vendor present. This
+ *  software creates no custodial relationship.
+ *
+ *  FAIL-CLOSED BY DESIGN. Agents propose; they do not unilaterally move funds.
+ *  Execution requires the Safe's threshold of signatures plus the owner's
+ *  authenticated instruction. Any unknown, stale, unverifiable or
+ *  out-of-policy fact must resolve to HOLD, never to proceed. Do not modify
+ *  this file in a way that weakens that guarantee.
+ *
+ *  NO WARRANTY; NOT FINANCIAL, LEGAL OR TAX ADVICE. Provided "AS IS", without
+ *  warranty of any kind, express or implied. Distributed-ledger transactions
+ *  are irreversible and may result in total loss of funds. You are solely
+ *  responsible for your own regulatory, KYC/AML, sanctions and tax
+ *  obligations. See LICENSE for the full terms.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+/**
  * SAGE — One-shot setup script
  *
  * Generates agent keys, adds them as Safe owners, and changes
@@ -188,10 +216,6 @@ async function main() {
   const ownerSet = new Set(currentOwners.map(a => a.toLowerCase()));
   for (const name of agents) {
     const agentAddr = agentWallets[name].address;
-    if (agentAddr.startsWith('(existing')) {
-      console.log(`  ⚠  ${name}: skipped (existing key — add manually if not already an owner)`);
-      continue;
-    }
     if (ownerSet.has(agentAddr.toLowerCase())) {
       console.log(`  ✓ ${name} (${agentAddr}) already an owner — skipping`);
       continue;

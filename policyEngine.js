@@ -1,4 +1,32 @@
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  SAGE — the agentic wallet for Safe multisig.
+ *  A product of CRIPTOGRAFIA CAPITAL, and the foundation of
+ *  CRIPTOGRAFIA PRIVATE (Non-Custodial Agentic Wealth Management).
+ *
+ *  Copyright (c) 2026 CRIPTOGRAFIA Capital.
+ *  Released under the MIT License. Free, sovereign, bring-your-own-key.
+ *
+ *  NON-CUSTODIAL. CRIPTOGRAFIA Capital never takes custody of your assets.
+ *  Funds are held solely by your own Safe multisig smart contract. Agent keys
+ *  are yours: encrypted at rest locally, or held in a vault you control. You
+ *  can always recover and operate your Safe with no vendor present. This
+ *  software creates no custodial relationship.
+ *
+ *  FAIL-CLOSED BY DESIGN. Agents propose; they do not unilaterally move funds.
+ *  Execution requires the Safe's threshold of signatures plus the owner's
+ *  authenticated instruction. Any unknown, stale, unverifiable or
+ *  out-of-policy fact must resolve to HOLD, never to proceed. Do not modify
+ *  this file in a way that weakens that guarantee.
+ *
+ *  NO WARRANTY; NOT FINANCIAL, LEGAL OR TAX ADVICE. Provided "AS IS", without
+ *  warranty of any kind, express or implied. Distributed-ledger transactions
+ *  are irreversible and may result in total loss of funds. You are solely
+ *  responsible for your own regulatory, KYC/AML, sanctions and tax
+ *  obligations. See LICENSE for the full terms.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+/**
  * SAGE — Policy Engine
  *
  * Decides whether an agent should auto-sign a pending Safe transaction
@@ -52,7 +80,7 @@ export const DECISION = {
  * Evaluate whether an agent should sign a pending Safe transaction.
  *
  * @param {object} tx         - the decoded transaction proposal
- * @param {object} context    - { kyc_verified, aml_clear, value_usd, token, is_new_address }
+ * @param {object} context    - { kyc_verified, aml_clear, value_usd, token, is_new_address, now }
  * @param {string} agentRole  - 'compliance' | 'execution'
  * @returns {{ decision: string, reasons: string[] }}
  */
@@ -62,19 +90,34 @@ export function evaluate(tx, context, agentRole = 'execution') {
   const human   = policy.always_human;
   const reasons = [];
 
+  // `context.now` lets callers (and tests) pin the clock. The operating-hours
+  // gate is time-dependent, so without an injection point it could neither be
+  // tested deterministically nor overridden for backfills. Defaults to the real
+  // clock, so production behaviour is unchanged.
+  const now = context.now instanceof Date ? context.now : new Date();
+
   // ── Hard rejects ────────────────────────────────────────────────────────
   if (context.aml_flagged) {
     return { decision: DECISION.REJECT, reasons: ['AML flag on address or amount'] };
   }
 
   // ── Always require human ─────────────────────────────────────────────────
-  if (context.value_usd > human.above_usd) {
+  // Value gate — FAIL CLOSED. A transaction whose USD value we could not
+  // establish must be held for a human, never treated as "under the limit".
+  // `undefined > limit` is false, so without this guard an unverifiable value
+  // silently satisfied every ">" comparison below and would reach AUTO_SIGN the
+  // moment KYC/AML were wired true — the exact "large transfer slips under a
+  // limit" failure this policy exists to prevent. Matches deriveTrustedContext's
+  // stated philosophy: default to the side that forces HOLD_HUMAN.
+  const valueKnown = Number.isFinite(context.value_usd) && context.value_usd >= 0;
+  if (!valueKnown) {
+    reasons.push('transaction USD value could not be verified');
+  } else if (context.value_usd > human.above_usd) {
     reasons.push(`value USD ${context.value_usd} > limit ${human.above_usd}`);
   }
   if (context.is_new_address && human.new_address) {
     reasons.push('destination address never seen before');
   }
-  const now  = new Date();
   // BRT = UTC-3. The old `getUTCHours() - 3` underflowed to negative values
   // before 03:00 UTC (e.g. 01:00 UTC → -2), silently breaking the comparison.
   // The `+ 24) % 24` keeps it in 0–23. (getDay() is still machine-local — a

@@ -1,15 +1,17 @@
 {
   "name": "@criptografia/sage",
   "version": "0.1.0",
-  "description": "SAGE — AI MultiSig Wallet. Safe + AGI signing layer via MCP.",
+  "description": "SAGE \u2014 AI MultiSig Wallet. Safe + AGI signing layer via MCP.",
   "type": "module",
   "main": "sage.js",
   "scripts": {
-    "test": "node --test",
+    "test": "node test/nonce-race.test.mjs && node test/keyless-exec.test.mjs",
     "start": "node sage.js",
     "keygen": "node sage.js keygen",
     "deploy-safe": "node sage.js deploy-safe",
-    "pending": "node sage.js pending"
+    "pending": "node sage.js pending",
+    "test:nonce": "node test/nonce-race.test.mjs",
+    "test:keyless": "node test/keyless-exec.test.mjs"
   },
   "dependencies": {
     "@safe-global/protocol-kit": "^5.0.0",
@@ -17,6 +19,13 @@
     "ethers": "^6.13.4",
     "viem": "^2.0.0"
   },
-  "keywords": ["safe", "multisig", "ai", "mcp", "wallet", "agents"],
+  "keywords": [
+    "safe",
+    "multisig",
+    "ai",
+    "mcp",
+    "wallet",
+    "agents"
+  ],
   "license": "MIT"
 }

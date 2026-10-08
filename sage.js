@@ -1,5 +1,33 @@
 #!/usr/bin/env node
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  SAGE — the agentic wallet for Safe multisig.
+ *  A product of CRIPTOGRAFIA CAPITAL, and the foundation of
+ *  CRIPTOGRAFIA PRIVATE (Non-Custodial Agentic Wealth Management).
+ *
+ *  Copyright (c) 2026 CRIPTOGRAFIA Capital.
+ *  Released under the MIT License. Free, sovereign, bring-your-own-key.
+ *
+ *  NON-CUSTODIAL. CRIPTOGRAFIA Capital never takes custody of your assets.
+ *  Funds are held solely by your own Safe multisig smart contract. Agent keys
+ *  are yours: encrypted at rest locally, or held in a vault you control. You
+ *  can always recover and operate your Safe with no vendor present. This
+ *  software creates no custodial relationship.
+ *
+ *  FAIL-CLOSED BY DESIGN. Agents propose; they do not unilaterally move funds.
+ *  Execution requires the Safe's threshold of signatures plus the owner's
+ *  authenticated instruction. Any unknown, stale, unverifiable or
+ *  out-of-policy fact must resolve to HOLD, never to proceed. Do not modify
+ *  this file in a way that weakens that guarantee.
+ *
+ *  NO WARRANTY; NOT FINANCIAL, LEGAL OR TAX ADVICE. Provided "AS IS", without
+ *  warranty of any kind, express or implied. Distributed-ledger transactions
+ *  are irreversible and may result in total loss of funds. You are solely
+ *  responsible for your own regulatory, KYC/AML, sanctions and tax
+ *  obligations. See LICENSE for the full terms.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+/**
  * SAGE — Agentic Wallet
  * Safe + AGI signing layer via MCP
  *
@@ -25,11 +53,12 @@ import { ethers }                   from 'ethers';
 import { SAGEClient, CHAINS }       from './safeClient.js';
 import { generateAgentKey, loadAgentSigner } from './agentKey.js';
 import { evaluate, DECISION }       from './policyEngine.js';
-import { proposeBatch, approveAll } from './batchOps.js';
+import { proposeBatch, approveAll, settlePending } from './batchOps.js';
 import { listContacts, resolveRecipientAsync, reverseEns } from './addressBook.js';
 import { makeAuthorizer } from './authz.js';
 import { inferenceStatus, listModels } from './inference.js';
-import { makeSigner } from './signer.js';
+import { makeSigner, makeTxSigner } from './signer.js';
+import { runAgentChat } from './agentChat.js';
 
 // ── Keyless signing resolver ──────────────────────────────────────────────────
 // When an agent is configured with a remote key backend (Warden / Vault), no
@@ -43,15 +72,87 @@ function resolveEnvPlaceholders(v) {
     ? v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k) => process.env[k] ?? '')
     : v;
 }
+
+/**
+ * Deployment mode. Two tiers, one binary:
+ *
+ *   public  (default) — SAGE free/sovereign. A local encrypted key + passphrase
+ *                       is a legitimate custody choice; keyless is optional.
+ *   private           — CRIPTOGRAFIA PRIVATE. Keyless is MANDATORY
+ *                       (ARCHITECTURE-secrets.md §0): a private key in an agent
+ *                       process is a policy violation, so the local-key path is
+ *                       refused rather than silently used.
+ *
+ * Set with SAGE_MODE=private|public.
+ */
+const SAGE_MODE = (process.env.SAGE_MODE || 'public').toLowerCase();
+const IS_PRIVATE = SAGE_MODE === 'private';
+
 function keylessSignerFor(agent, cfg) {
   const spec = cfg.keys && cfg.keys[agent];
-  if (!spec || spec.backend === 'local') return null;   // no remote backend → use local encrypted key
+  if (!spec || spec.backend === 'local') {
+    // In PRIVATE there is no legitimate local-key path. Fail loudly at the point
+    // of use rather than quietly signing with a key that should not exist here.
+    if (IS_PRIVATE) {
+      throw new Error(
+        `SAGE_MODE=private: agent "${agent}" has no remote key backend ` +
+        `(keys.${agent}.backend is ${spec ? `"${spec.backend}"` : 'unset'}). ` +
+        `PRIVATE requires keyless signing — configure a warden/vault backend.`);
+    }
+    return null;   // public: use the local encrypted key
+  }
+  const endpoint = resolveEnvPlaceholders(spec.endpoint);
+  // A keyless backend can be CONFIGURED (e.g. Warden) before its endpoint env is
+  // provisioned. In PUBLIC that degrades gracefully to the local encrypted key —
+  // which, for a same-address vault migration, is the very same key/owner, so
+  // setting WARDEN_ENDPOINT flips the agent to keyless with no config change and
+  // no address change.
+  //
+  // In PRIVATE that same fallback is the bug we must never ship: the deployment
+  // would look keyless and sign with a local key. Refuse instead.
+  if (!endpoint) {
+    if (IS_PRIVATE) {
+      throw new Error(
+        `SAGE_MODE=private: agent "${agent}" declares backend "${spec.backend}" but its ` +
+        `endpoint resolved empty (${spec.endpoint}). Provision WARDEN_ENDPOINT / the vault ` +
+        `endpoint — PRIVATE will not fall back to a local key.`);
+    }
+    return null;
+  }
   const headers = spec.headers ? Object.fromEntries(
     Object.entries(spec.headers).map(([k, v]) => [k, resolveEnvPlaceholders(v)])) : {};
   return makeSigner({
     ...spec,
-    endpoint: resolveEnvPlaceholders(spec.endpoint),
-    keyRef:   resolveEnvPlaceholders(spec.keyRef),
+    endpoint,
+    keyRef: resolveEnvPlaceholders(spec.keyRef),
+    headers,
+  });
+}
+
+/**
+ * Resolve the KEYLESS SETTLEMENT signer — the vault identity permitted to broadcast
+ * execTransaction.
+ *
+ * Distinct from keylessSignerFor() on purpose. That produces Safe OWNER signatures,
+ * which the Safe threshold bounds. This produces RAW TRANSACTION signatures, which
+ * nothing bounds — so it routes to the vault's verifying `/sign-tx` endpoint, where the
+ * transaction is rebuilt and checked (execTransaction only, known Safe, zero value,
+ * capped gas) before anything is signed.
+ *
+ * Config lives under `keys.settlement` in sage-config.json. Returns null when not
+ * configured, in which case a keyless run signs to threshold and defers settlement.
+ */
+function keylessExecutorFor(cfg) {
+  const spec = cfg.keys && cfg.keys.settlement;
+  if (!spec) return null;
+  const endpoint = resolveEnvPlaceholders(spec.endpoint);
+  if (!endpoint) return null;
+  const headers = spec.headers ? Object.fromEntries(
+    Object.entries(spec.headers).map(([k, v]) => [k, resolveEnvPlaceholders(v)])) : {};
+  return makeTxSigner({
+    address: spec.address,
+    endpoint,
+    keyRef: resolveEnvPlaceholders(spec.keyRef),
     headers,
   });
 }
@@ -84,7 +185,11 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 
 // ── Config ─────────────────────────────────────────────────────────────────
 function loadConfig() {
-  const cfgPath = join(__dir, 'sage-config.json');
+  // SAGE_CONFIG lets a deployment keep its config OUTSIDE the SAGE tree. Without it the
+  // config must sit beside sage.js — which breaks as soon as SAGE is consumed as a
+  // dependency, because npm install would wipe it. A downstream product (CRIPTOGRAFIA
+  // PRIVATE) needs to own its own config while sharing one SAGE source.
+  const cfgPath = process.env.SAGE_CONFIG || join(__dir, 'sage-config.json');
   if (!existsSync(cfgPath)) return {};
   return JSON.parse(readFileSync(cfgPath, 'utf8'));
 }
@@ -107,6 +212,16 @@ function loadConfig() {
  */
 export function resolveSafeAddress(cfg = loadConfig()) {
   return cfg.safe_address || process.env.SAGE_SAFE_ADDRESS || null;
+}
+
+/**
+ * Resolve which chain to operate on. SAGE_CHAIN wins so a POC/testnet service
+ * (e.g. the Amoy publisher/signer containers) can point at a different chain
+ * than the shared sage-config.json without editing that file — the prod monitor
+ * keeps reading `chain` from config.
+ */
+export function resolveChain(cfg = loadConfig()) {
+  return process.env.SAGE_CHAIN || cfg.chain || 'polygon';
 }
 
 // ── Audit log ───────────────────────────────────────────────────────────────
@@ -269,8 +384,8 @@ function startDaemon() {
 
   let client = null;
   if (safe) {
-    client = new SAGEClient(cfg.chain || 'polygon', safe);
-    console.error(`[SAGE] daemon: monitoring Safe ${safe} on ${cfg.chain || 'polygon'} every ${intervalMs}ms`);
+    client = new SAGEClient(resolveChain(cfg), safe);
+    console.error(`[SAGE] daemon: monitoring Safe ${safe} on ${resolveChain(cfg)} every ${intervalMs}ms`);
   } else {
     console.error('[SAGE] daemon: no Safe configured — health server up, monitor idle until SAGE_SAFE_ADDRESS is set.');
   }
@@ -301,6 +416,172 @@ function startDaemon() {
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();   // hard stop if close hangs
   };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+}
+
+// ── Agent HTTP service (`serve`) — the bots the web frontend talks to ─────────
+// Each SAGE agent runs as its own HTTP service scoped to a ROLE. The Privy web
+// frontend authenticates a human (social login) and forwards that identity as
+// the `operator`; the agent then acts within its role's tool allow-list.
+//
+//   publisher — proposal agent: inspects, simulates, and PROPOSES (never executes)
+//   signer    — signing agent: on the operator's instruction, co-signs/executes
+//               pending txs that pass policy
+//
+// Roles map to the underlying agent keys already on disk:
+//   publisher → compliance key,  signer → execution key.
+const ROLE = {
+  publisher: {
+    agentKey: 'compliance',
+    tools: ['sage_info', 'sage_pending', 'sage_address_book', 'sage_simulate',
+            'sage_propose', 'sage_propose_batch', 'sage_policy', 'sage_history',
+            'sage_inference', 'sage_models'],
+    system:
+      'You are SAGE PUBLISHER, the proposal agent for a Safe multisig wallet. ' +
+      'You can inspect the Safe, read the address book, simulate a transaction, and ' +
+      'PROPOSE transactions (each proposal carries your first signature). You NEVER ' +
+      'execute or add the final signature — a human-authorised signer does that. ' +
+      'Always confirm the recipient and amount before proposing; prefer address-book ' +
+      'names/#numbers and ENS. If policy would hold a tx for a human, say so plainly. ' +
+      'Be concise and never invent addresses or balances — call a tool.',
+  },
+  signer: {
+    agentKey: 'execution',
+    tools: ['sage_info', 'sage_pending', 'sage_policy', 'sage_history',
+            'sage_simulate', 'sage_approve_all', 'sage_inference', 'sage_models'],
+    system:
+      'You are SAGE SIGNER, the signing agent for a Safe multisig wallet. On the ' +
+      'authenticated operator\'s explicit instruction you add your signature to ' +
+      'pending transactions and execute those that reach threshold — but ONLY ones ' +
+      'the policy engine permits; never sign what policy holds or rejects. Summarise ' +
+      'exactly what you signed/executed and what still needs a human. Be concise and ' +
+      'always read the real pending list with a tool before acting.',
+  },
+};
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', c => { raw += c; if (raw.length > 1e6) req.destroy(); });
+    req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch (e) { reject(e); } });
+    req.on('error', reject);
+  });
+}
+
+// Resolve the role this service serves. `publisher`/`signer` are built in above.
+// ANY other role is defined entirely by environment, so proprietary personas
+// (PRIVATE's concierge / treasury / compliance / …) live OUTSIDE this public
+// file and are injected at deploy time — nothing about them ships in SAGE:
+//   SAGE_ROLE         the role label (e.g. "concierge")
+//   SAGE_SYSTEM_FILE  path to a file whose contents become the system prompt
+//                     (a PRIVATE SKILL.md; YAML frontmatter is stripped)
+//   SAGE_SYSTEM       inline system prompt (fallback if no file)
+//   SAGE_TOOLS        comma-separated tool allow-list (default: read-only set —
+//                     a specialist agent gets NO fund-moving tools unless granted)
+//   SAGE_AGENT_KEY    agent key used for any signing tools granted (default: compliance)
+function resolveRole(roleArg) {
+  const name = roleArg || process.env.SAGE_ROLE || 'publisher';
+  if (ROLE[name]) return { name, ...ROLE[name] };
+
+  const known = new Set(TOOLS.map(t => t.name));
+  let system = process.env.SAGE_SYSTEM || '';
+  const sysFile = process.env.SAGE_SYSTEM_FILE;
+  if (sysFile && existsSync(sysFile)) {
+    // Strip a leading YAML frontmatter block (`---\n…\n---`) so a skill file's
+    // body is the prompt.
+    system = readFileSync(sysFile, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+  }
+  if (!system) system = `You are the SAGE "${name}" agent. Use your tools to answer precisely; never invent on-chain facts — always call a tool.`;
+
+  const READONLY = ['sage_info', 'sage_pending', 'sage_policy', 'sage_history',
+                    'sage_simulate', 'sage_address_book', 'sage_inference', 'sage_models'];
+  const tools = (process.env.SAGE_TOOLS ? process.env.SAGE_TOOLS.split(',').map(s => s.trim()) : READONLY)
+    .filter(t => known.has(t));
+  return { name, tools, system, agentKey: process.env.SAGE_AGENT_KEY || 'compliance' };
+}
+
+function startServe(roleArg) {
+  const role = resolveRole(roleArg);
+  const roleName = role.name;
+  const cfg  = loadConfig();
+  const port = Number(process.env.SAGE_PORT || (roleName === 'signer' ? 3011 : 3010));
+
+  // Scope + enrich a tool call for this role: only allow-listed tools, and inject
+  // the authenticated operator + the role's agent key into action tools. The
+  // operator is the human co-signature of record — it comes from the trusted
+  // caller (the frontend that verified the Privy token), never from the model.
+  const callTool = (name, args, operator) => {
+    if (!role.tools.includes(name)) {
+      return Promise.resolve({ error: `tool "${name}" is not available to the ${roleName} agent` });
+    }
+    const a = { ...args };
+    if (['sage_propose', 'sage_propose_batch', 'sage_approve', 'sage_approve_all', 'sage_simulate'].includes(name)) {
+      a.agent = a.agent || role.agentKey;
+    }
+    if (['sage_propose_batch', 'sage_approve_all'].includes(name) && operator) {
+      a.operator = operator;
+    }
+    return handleTool(name, a);
+  };
+
+  const send = (res, code, obj) => {
+    res.writeHead(code, {
+      'content-type': 'application/json',
+      // Permissive CORS for local dev; the real path is a same-origin Next API
+      // route that proxies server-side, so this is a convenience, not the auth.
+      'access-control-allow-origin':  '*',
+      'access-control-allow-headers': 'content-type, x-sage-operator',
+      'access-control-allow-methods': 'GET, POST, OPTIONS',
+    });
+    res.end(JSON.stringify(obj));
+  };
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      if (req.method === 'OPTIONS') return send(res, 204, {});
+      const url = new URL(req.url, 'http://localhost');
+      const operator = req.headers['x-sage-operator'] || undefined;
+
+      if (req.method === 'GET' && url.pathname === '/health') {
+        return send(res, 200, { status: 'ok', role: roleName, wallet: resolveSafeAddress(cfg), inference: inferenceStatus(cfg).usable });
+      }
+      if (req.method === 'GET' && url.pathname === '/agent') {
+        return send(res, 200, {
+          role: roleName, agent_key: role.agentKey,
+          tools: role.tools, inference: inferenceStatus(cfg),
+        });
+      }
+      // Raw tool call — role-scoped. POST /tools/sage_pending { ...args }
+      if (req.method === 'POST' && url.pathname.startsWith('/tools/')) {
+        const name = url.pathname.slice('/tools/'.length);
+        const args = await readJsonBody(req);
+        return send(res, 200, await callTool(name, args, operator));
+      }
+      // Natural-language turn. POST /chat { message, operator? }
+      if (req.method === 'POST' && url.pathname === '/chat') {
+        const body = await readJsonBody(req);
+        if (!body.message) return send(res, 400, { error: 'missing "message"' });
+        const op = operator || body.operator;
+        const tools = TOOLS.filter(t => role.tools.includes(t.name));
+        const result = await runAgentChat({
+          message:  body.message,
+          system:   role.system,
+          tools,
+          callTool: (n, a) => callTool(n, a, op),
+          cfg,
+        });
+        return send(res, result.ok ? 200 : 502, result);
+      }
+      return send(res, 404, { error: 'not found' });
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
+  });
+
+  server.listen(port, () => console.error(`[SAGE] ${roleName} agent serving on :${port} (agent key: ${role.agentKey})`));
+
+  const shutdown = sig => { console.error(`[SAGE] ${roleName}: ${sig}, shutting down.`); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT',  () => shutdown('SIGINT'));
 }
@@ -392,6 +673,32 @@ const TOOLS = [
     },
   },
   {
+    name: 'sage_reject',
+    description: 'Refuse a queued transaction by consuming its nonce with a rejection transaction (a 0-value call from the Safe to itself). This is the ONLY way to refuse: a Safe cannot decline, its nonce must be consumed or the queue stays blocked. Costs gas and needs the same threshold as a payment. Deleting a proposal instead leaves a permanent gap and is almost never right.',
+    inputSchema: {
+      type: 'object',
+      required: ['nonce'],
+      properties: {
+        nonce:    { type: 'number', description: 'The Safe nonce to consume' },
+        agent:    { type: 'string', description: 'Proposing agent (default: compliance)' },
+        settle:   { type: 'boolean', description: 'Settle it immediately once at threshold (default true)' },
+        operator: { type: 'string', description: 'Authenticated owner authorising the refusal' },
+      },
+    },
+  },
+  {
+    name: 'sage_settle',
+    description: 'Settle transactions that ALREADY meet the signature threshold, draining the queue in nonce order. Signs nothing and adds no authority — it only broadcasts what is already approved. Use after signing, or whenever a signed queue has stalled behind an executed head.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        only: { type: 'array', items: { type: 'string' },
+                description: 'Optional allow-list of safeTxHashes to settle (scope guard)' },
+        max:  { type: 'number', description: 'Max transactions to settle in one run (default 25)' },
+      },
+    },
+  },
+  {
     name: 'sage_history',
     description: 'Get the last N executed transactions from this Safe.',
     inputSchema: {
@@ -439,7 +746,7 @@ const TOOLS = [
 // ── Tool handlers ────────────────────────────────────────────────────────────
 async function handleTool(name, args) {
   const cfg    = loadConfig();
-  const chain  = cfg.chain || 'polygon';
+  const chain  = resolveChain(cfg);
   const safe   = resolveSafeAddress(cfg);
 
   if (!safe && !['sage_policy', 'sage_address_book', 'sage_inference', 'sage_models', 'sage_simulate'].includes(name)) {
@@ -452,30 +759,137 @@ async function handleTool(name, args) {
 
     case 'sage_info': {
       const summary = await client.summarise();
+
+      // FAIL-CLOSED: when the Safe's own state could not be read, say so. The old
+      // shape rendered `owners: []` / `?-of-?` and returned success, so a caller
+      // could not tell an unreadable Safe from an ownerless one — and an agent
+      // watching for owner/threshold drift would be silently blind. An unread
+      // owner set is `null` plus an explicit error, never an empty list.
+      const unread = summary.unavailable?.info;
       return {
         wallet:   summary.safe,
         chain:    summary.chain,
-        owners:   summary.info?.owners || [],
-        threshold:`${summary.info?.threshold || '?'}-of-${summary.info?.owners?.length || '?'}`,
-        nonce:    summary.info?.nonce,
+        owners:   unread ? null : (summary.info?.owners || []),
+        threshold: unread
+          ? null
+          : `${summary.info?.threshold ?? '?'}-of-${summary.info?.owners?.length ?? '?'}`,
+        nonce:    unread ? null : summary.info?.nonce,
         pending_count: summary.pending.length,
         recent_txs:    summary.recent.length,
+        ...(summary.unavailable ? {
+          unverified: summary.unavailable,
+          warning: 'Some Safe state could not be read. Treat the null fields as UNVERIFIED, ' +
+                   'not as absent — do not sign or clear anything on the strength of them.',
+        } : {}),
       };
+    }
+
+    case 'sage_reject': {
+      const { nonce, agent = 'compliance', settle = true,
+              operator = process.env.SAGE_OPERATOR } = args;
+      if (nonce === undefined || nonce === null) return { error: 'nonce is required' };
+
+      const proposer = keylessSignerFor(agent, cfg);
+      if (!proposer) return { error: `no keyless backend for agent "${agent}"` };
+
+      // Refusing is a fund-path action: it costs gas, needs threshold, and permanently
+      // kills whatever occupied that slot. It must be authorised like any other.
+      if (!operator) {
+        return { error: 'operator identity required — a refusal permanently invalidates the transaction in that slot and must be authorised by an authenticated owner' };
+      }
+
+      const rejection = await client.proposeRejectionKeyless(nonce, proposer);
+      auditLog({ action: 'proposed_rejection', nonce, safe_tx_hash: rejection.safeTxHash,
+                 operator, proposer: proposer.getAddress() });
+
+      // Co-sign with the execution owner so it reaches threshold.
+      const cosigner = keylessSignerFor('execution', cfg);
+      let signed = null;
+      if (cosigner) {
+        signed = await client.signTransactionKeyless(rejection.safeTxHash, cosigner);
+        auditLog({ action: 'signed_rejection', safe_tx_hash: rejection.safeTxHash,
+                   signer: cosigner.getAddress(), operator });
+      }
+
+      let settlement = null;
+      if (settle) {
+        const executor = keylessExecutorFor(cfg);
+        if (executor) {
+          try {
+            settlement = await client.executeTransactionKeyless(rejection.safeTxHash, executor, { wait: true });
+            auditLog({ action: 'settled_rejection', nonce, execTxHash: settlement.execTxHash, operator });
+          } catch (e) {
+            settlement = { error: e.message };
+          }
+        }
+      }
+
+      return {
+        rejected_nonce: nonce,
+        rejection_safe_tx_hash: rejection.safeTxHash,
+        signed: !!signed,
+        settlement,
+        note: 'Once this settles, every transaction that was queued at this nonce becomes permanently invalid.',
+      };
+    }
+
+    case 'sage_settle': {
+      const { only = null, max = 25 } = args;
+      const executor = keylessExecutorFor(cfg);
+      if (!executor) {
+        return { error: 'no keyless settlement backend configured (keys.settlement in sage-config.json + WARDEN_TX_ENDPOINT)' };
+      }
+      const result = await settlePending(client, executor, { only, max });
+      auditLog({ action: 'settled_batch', executor: executor.getAddress(),
+                 settled: result.settled, summary: result.summary });
+      return result;
     }
 
     case 'sage_pending': {
       const pending = await client.getPendingTransactions();
       if (pending.length === 0) return { message: 'No transactions pending signature.', pending: [] };
+
+      // The Safe's own nonce decides both WHICH transaction can execute next and whether
+      // two entries are rivals for one slot. Omitting it made this tool unusable for any
+      // nonce-scoped authorisation ("sign nonces 1-5"), and with duplicate values a
+      // signer could not tell a live transaction from a dead rival. Expose it, plus the
+      // calldata and a decode, so a desk can verify what it is signing without a second
+      // call it cannot make.
+      const safeNonce = Number((await client.getSafeInfo().catch(() => null))?.nonce ?? NaN);
+      const byNonce = {};
+      for (const tx of pending) (byNonce[tx.nonce] ||= []).push(tx);
+
       return {
         count: pending.length,
-        transactions: pending.map(tx => ({
-          safeTxHash:    tx.safeTxHash,
-          to:            tx.to,
-          value_eth:     tx.valuEth,
-          confirmations: `${tx.confirmations}/${tx.confirmationsRequired}`,
-          proposed_by:   tx.proposedBy,
-          submitted:     tx.submissionDate,
-        })),
+        safe_nonce: Number.isNaN(safeNonce) ? null : safeNonce,
+        note: 'A Safe executes in strict nonce order. Only transactions at safe_nonce can '
+            + 'execute now; entries sharing a nonce are RIVALS and only one of them can '
+            + 'ever execute.',
+        transactions: pending.map(tx => {
+          const decoded = SAGEClient.describeProposal({
+            to: tx.to, value: tx.value, data: tx.data, nonce: tx.nonce,
+          });
+          const rivals = (byNonce[tx.nonce] || []).length - 1;
+          return {
+            safeTxHash:    tx.safeTxHash,
+            nonce:         tx.nonce,
+            to:            tx.to,
+            value_eth:     tx.valuEth,
+            value_wei:     tx.value,
+            data:          tx.data || '0x',
+            is_plain_transfer: !tx.data || tx.data === '0x',
+            erc20:         decoded.erc20 || null,
+            confirmations: `${tx.confirmations}/${tx.confirmationsRequired}`,
+            confirmed_by:  tx.confirmedBy,
+            proposed_by:   tx.proposedBy,
+            submitted:     tx.submissionDate,
+            executable_now: Number.isNaN(safeNonce) ? null : tx.nonce === safeNonce,
+            rivals_at_this_nonce: rivals,
+            ...(Number.isNaN(safeNonce) ? {} : tx.nonce < safeNonce
+              ? { status: 'DEAD — this nonce has already executed; it can never settle' }
+              : {}),
+          };
+        }),
       };
     }
 
@@ -512,6 +926,21 @@ async function handleTool(name, args) {
       if (keyless) {
         result = await client.signTransactionKeyless(safe_tx_hash, keyless);
         auditLog({ action: 'signed', safe_tx_hash, agent, signer: keyless.getAddress(), keyless: true });
+
+        // Settle if the signature just reached threshold and a verified executor exists.
+        // Failure here is not a signing failure — the signature stands — so report it
+        // rather than throwing away a good co-signature.
+        const executor = keylessExecutorFor(cfg);
+        if (executor) {
+          try {
+            const ex = await client.executeTransactionKeyless(safe_tx_hash, executor);
+            result = { ...result, executed: true, execTxHash: ex.execTxHash };
+            auditLog({ action: 'executed', safe_tx_hash, execTxHash: ex.execTxHash,
+                       executor: executor.getAddress(), keyless: true });
+          } catch (e) {
+            result = { ...result, executed: false, execution_deferred: e.message };
+          }
+        }
       } else {
         const signer = loadAgentSigner(agent, pass, client.provider);
         result = await client.signTransaction(safe_tx_hash, signer);
@@ -569,8 +998,15 @@ async function handleTool(name, args) {
 
     case 'sage_propose': {
       const { to, value = '0', data = '0x', agent = 'execution' } = args;
+
+      // Keyless first, exactly as sage_approve does. Without this the first
+      // signature had no compliant path in PRIVATE, where a local key is a policy
+      // violation — proposing would demand the very passphrase the tier forbids.
+      const keyless = keylessSignerFor(agent, cfg);
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
-      if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
+      if (!keyless && !pass) {
+        return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key (or configure keys.${agent} for a remote vault backend).` };
+      }
 
       // Resolve `to`: accepts a literal address, an ENS name ("acme.eth"), a book
       // number ("5"), or a saved name ("Acme"). Fails loudly on no/ambiguous
@@ -578,6 +1014,12 @@ async function handleTool(name, args) {
       let recipient;
       try { recipient = await resolveRecipientAsync(to, { provider: ensProvider() }); }
       catch (e) { return { error: e.message }; }
+
+      if (keyless) {
+        const result = await client.proposeTransactionKeyless({ to: recipient.address, value, data }, keyless);
+        auditLog({ action: 'proposed', agent, signer: keyless.getAddress(), to: recipient.address, to_name: recipient.name, value, keyless: true });
+        return { ...result, recipient };
+      }
 
       const signer = loadAgentSigner(agent, pass, client.provider);
       const result = await client.proposeTransaction({ to: recipient.address, value, data }, signer);
@@ -587,8 +1029,14 @@ async function handleTool(name, args) {
 
     case 'sage_propose_batch': {
       const { transactions, agent = 'compliance', operator = process.env.SAGE_OPERATOR } = args;
+
+      // Keyless first, as in sage_propose / sage_approve. In PRIVATE the vault holds
+      // the key and this agent has no passphrase to offer.
+      const keyless = keylessSignerFor(agent, cfg);
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
-      if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
+      if (!keyless && !pass) {
+        return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key (or configure keys.${agent} for a remote vault backend).` };
+      }
 
       // Resolve every recipient BEFORE proposing anything (addresses, ENS names,
       // book numbers/names) — a typo'd/ambiguous/unresolvable name aborts the
@@ -601,17 +1049,24 @@ async function handleTool(name, args) {
         }));
       } catch (e) { return { error: e.message }; }
 
-      const signer = loadAgentSigner(agent, pass, client.provider);
-      const result = await proposeBatch(client, signer, resolved, { operator });
-      auditLog({ action: 'proposed_batch', agent, signer: signer.address, operator, count: result.count, summary: result.summary });
+      const signer = keyless ? null : loadAgentSigner(agent, pass, client.provider);
+      const result = await proposeBatch(client, signer, resolved, { operator, keyless });
+      auditLog({ action: 'proposed_batch', agent, signer: result.proposer, operator,
+                 count: result.count, summary: result.summary, ...(keyless ? { keyless: true } : {}) });
       return result;
     }
 
     case 'sage_approve_all': {
       const { agent = 'execution', only = null, execute = true, operator = process.env.SAGE_OPERATOR, authorization = null } = args;
       if (!operator) return { error: 'operator identity required — pass `operator` (authenticated owner email) or set SAGE_OPERATOR. A batch approval must be authorised by an authenticated owner.' };
+
+      // Keyless first, exactly as sage_approve / sage_propose / sage_propose_batch do.
+      // Without this branch approve_all was the ONE mutation path that still demanded a
+      // local key, so in PRIVATE — where a passphrase is forbidden and keyless is
+      // mandatory (ARCHITECTURE-secrets.md §0) — batch approval could never run.
+      const keyless = keylessSignerFor(agent, cfg);
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
-      if (!pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key.` };
+      if (!keyless && !pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key (or configure keys.${agent} for a remote vault backend).` };
 
       // Hardware 2FA: enforced when the operator has a registered device or the
       // policy demands it. Fail-closed — a registered operator can't skip 2FA by
@@ -619,11 +1074,14 @@ async function handleTool(name, args) {
       const require2fa = !!deviceFor(operator) || !!(cfg.policy && cfg.policy.require_2fa);
       const gate = require2fa ? { authorize: authorizer, proof: authorization } : {};
 
-      const signer = loadAgentSigner(agent, pass, client.provider);
-      const result = await approveAll(client, signer, { operator, only, execute, ...gate });
-      auditLog({ action: 'approve_all', agent, signer: signer.address, operator, count: result.count, summary: result.summary,
+      // Keyless (vault) if configured, else the local encrypted key.
+      const signer = keyless ? null : loadAgentSigner(agent, pass, client.provider);
+      const executor = keyless ? keylessExecutorFor(cfg) : null;
+      const result = await approveAll(client, signer, { operator, only, execute, keyless, executor, ...gate });
+      auditLog({ action: 'approve_all', agent, signer: keyless ? keyless.getAddress() : signer.address, operator, count: result.count, summary: result.summary,
                  // record the per-tx outcome so an override is always traceable to the authorising owner
-                 results: result.results.map(r => ({ safeTxHash: r.safeTxHash, status: r.status, policy: r.policy, overrode_hold: r.overrode_hold })) });
+                 results: result.results.map(r => ({ safeTxHash: r.safeTxHash, status: r.status, policy: r.policy, overrode_hold: r.overrode_hold })),
+                 ...(keyless ? { keyless: true } : {}) });
       return result;
     }
 
@@ -670,7 +1128,7 @@ async function runCLI(argv) {
 
   if (cmd === 'pending') {
     const cfg    = loadConfig();
-    const client = new SAGEClient(cfg.chain || 'polygon', resolveSafeAddress(cfg));
+    const client = new SAGEClient(resolveChain(cfg), resolveSafeAddress(cfg));
     const result = await handleTool('sage_pending', {});
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -678,7 +1136,7 @@ async function runCLI(argv) {
 
   if (cmd === 'info') {
     const cfg    = loadConfig();
-    const client = new SAGEClient(cfg.chain || 'polygon', resolveSafeAddress(cfg));
+    const client = new SAGEClient(resolveChain(cfg), resolveSafeAddress(cfg));
     const result = await handleTool('sage_info', {});
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -721,6 +1179,13 @@ async function runCLI(argv) {
   // an HTTP /health endpoint (the Dockerfile healthcheck) and polls pending txs.
   if (cmd === 'daemon') {
     startDaemon();
+    return;
+  }
+
+  // Role-scoped HTTP agent service (publisher | signer) — what the web frontend
+  // talks to. Role from `SAGE_ROLE` or the first arg: `node sage.js serve signer`.
+  if (cmd === 'serve') {
+    startServe(process.env.SAGE_ROLE || rest[0] || 'publisher');
     return;
   }
 

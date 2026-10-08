@@ -35,7 +35,7 @@ const SIGNER = { address: '0xAaAaAAAAaAAAAaAAaAAAAAAAaaAAaAAaAAaAAAaA' };
 
 /** A configurable mock SAGEClient. Records calls so we can assert on them. */
 function mockClient(pending, { details = {}, failOnSign = new Set(), failOnExec = new Set() } = {}) {
-  const calls = { signed: [], executed: [] };
+  const calls = { signed: [], signedKeyless: [], executed: [] };
   return {
     calls,
     async getPendingTransactions() { return pending; },
@@ -46,6 +46,11 @@ function mockClient(pending, { details = {}, failOnSign = new Set(), failOnExec 
       if (failOnSign.has(hash)) throw new Error('sign boom');
       calls.signed.push(hash);
       return { signed: true, safeTxHash: hash };
+    },
+    async signTransactionKeyless(hash) {
+      if (failOnSign.has(hash)) throw new Error('sign boom');
+      calls.signedKeyless.push(hash);
+      return { signed: true, safeTxHash: hash, keyless: true };
     },
     async executeTransaction(hash) {
       if (failOnExec.has(hash)) throw new Error('exec boom');
@@ -152,6 +157,37 @@ await approveAll(mockClient([]), SIGNER, {}).then(
   check('2FA gate receives operator + the batch hashes + proof',
     sawArgs.operator === 'owner@corp.com' && sawArgs.hashes[0] === '0xL' && sawArgs.proof.type === 'hw-wallet');
 }
+
+// ── keyless: signs via the vault (signTransactionKeyless), never a local key ──
+{
+  const KEYLESS = { getAddress: () => '0xVau1tOwnerAddreSSAddreSSAddreSSAddreSS00' };
+  const client = mockClient([tx('0xKL')]);
+  const res = await approveAll(client, null, { operator: 'owner@corp.com', keyless: KEYLESS });
+  const r = res.results[0];
+  check('keyless signs through the vault path', client.calls.signedKeyless.includes('0xKL'));
+  check('keyless never touches the local-key sign path', client.calls.signed.length === 0);
+  check('keyless result is marked keyless', r.keyless === true);
+  // Threshold (2/2) reached, but keyless agents cannot broadcast: sign-to-threshold,
+  // defer landing — do NOT claim "executed", and never call executeTransaction.
+  check('keyless does NOT execute (no keyless relayer)', client.calls.executed.length === 0);
+  check('keyless marks the threshold tx executable + deferred', r.status === 'signed' && r.executable === true && /deferred/.test(r.execution || ''));
+}
+
+// ── keyless: dedup uses the vault owner address, not a local wallet ────────────
+{
+  const KEYLESS = { getAddress: () => '0xVau1tOwnerAddreSSAddreSSAddreSSAddreSS00' };
+  const already = tx('0xKLD', { confirmedBy: ['0xProposer', '0xVau1tOwnerAddreSSAddreSSAddreSSAddreSS00'] });
+  const client = mockClient([already]);
+  const res = await approveAll(client, null, { operator: 'owner@corp.com', keyless: KEYLESS });
+  check('keyless skips a tx the vault owner already signed', res.results[0].status === 'skipped');
+  check('keyless skip does not re-sign', client.calls.signedKeyless.length === 0);
+}
+
+// ── approveAll with neither a local signer nor a keyless signer → throws ───────
+await approveAll(mockClient([tx('0xNONE')]), null, { operator: 'owner@corp.com' }).then(
+  () => check('approveAll without signer or keyless → throws', false),
+  (e) => check('approveAll without signer or keyless → throws', /local `signer` or .*keyless/.test(e.message)),
+);
 
 // ── proposeBatch: proposes each, survives a bad entry ─────────────────────────
 {
