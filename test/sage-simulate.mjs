@@ -62,6 +62,7 @@ const check = (name, cond, detail = '') => {
   const assume  = {
     kyc_verified: true, aml_clear: true, value_usd: 100, is_new_address: false,
     now: new Date('2025-06-11T15:00:00Z'),   // Wed 12h BRT — inside operating hours
+    token: 'USDT',                            // auto-sign requires a whitelisted token
   };
   const { decision, reasons } = evaluate(details, { ...deriveTrustedContext(details), ...assume });
   check('what-if cleared + under limit → AUTO_SIGN', decision === DECISION.AUTO_SIGN,

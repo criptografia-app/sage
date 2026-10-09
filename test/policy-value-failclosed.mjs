@@ -46,6 +46,7 @@ const base = {
   kyc_verified: true,
   aml_clear:    true,
   is_new_address: false,
+  token:        'USDC',      // the token gate requires an explicitly whitelisted symbol
 };
 
 // ── 1. THE regression: unknown value must not auto-sign ──────────────────────
@@ -58,7 +59,7 @@ const base = {
   );
   check(
     'the hold reason names the unverifiable value',
-    reasons.some(r => /could not be verified/i.test(r)),
+    reasons.some(r => /could not be verified|not a verified amount/i.test(r)),
     JSON.stringify(reasons),
   );
 }
