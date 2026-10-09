@@ -10,14 +10,15 @@
  *           v2.x, so any caller got a TypeError. It now reads the native
  *           balance from the RPC provider.
  *
- *   Bug B — getHistory(limit) passed { executed, limit } to getAllTransactions,
- *           whose options are only { executed, queued, trusted }. The `limit`
- *           was silently dropped, so `sage_history`'s advertised limit did
- *           nothing. It now slices the page to `limit` and never sends the
- *           unsupported option.
+ *   Bug B — getHistory(limit) passed { executed, limit } to api-kit's
+ *           getAllTransactions, which silently dropped `limit`. getHistory now
+ *           reads the Transaction Service's multisig-transactions endpoint
+ *           directly (authenticated like the other reads), asks for executed txs
+ *           newest first, sends `limit` as the query parameter that endpoint
+ *           supports, and still caps the result client-side.
  *
- * No network, no keys: apiKit and provider are stubbed on the instance, so the
- * constructor's real objects are never called.
+ * No network, no keys: fetch, apiKit and provider are stubbed, so nothing real
+ * is ever called.
  *
  * Run: node test/safe-client.mjs
  */
@@ -31,32 +32,37 @@ const check = (name, cond) => {
 
 const SAFE = '0xe601D7B4103FD508dA521A25D7639F085448196d';
 
-// ── Bug B: getHistory honours `limit` and omits the unsupported option ────────
+// ── Bug B: getHistory reads executed txs, newest first, honouring `limit` ─────
 {
   const client = new SAGEClient('polygon', SAFE);
-  let seenOptions = null;
-  // 12 fake executed txs — more than any limit we ask for.
+  // 12 fake executed txs — more than some limits we ask for. The stub ignores the
+  // limit on purpose, so the client-side cap is exercised too.
   const page = Array.from({ length: 12 }, (_, i) => ({ id: i }));
-  client.apiKit = {
-    getAllTransactions: async (addr, options) => {
-      seenOptions = { addr, options };
-      return { results: page };
-    },
-    // If getHistory ever regressed to calling a paging/limit API, surface it.
+  const urls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    urls.push(new URL(url));
+    return { ok: true, status: 200, json: async () => ({ results: page }) };
   };
+  try {
+    const five = await client.getHistory(5);
+    const u = urls[0];
+    check('getHistory caps results at limit', five.length === 5);
+    check('getHistory queried the configured Safe',
+      u.pathname.includes(`/safes/${SAFE}/multisig-transactions/`));
+    check('getHistory requests executed txs', u.searchParams.get('executed') === 'true');
+    check('getHistory asks for newest first', u.searchParams.get('ordering') === '-nonce');
+    check('getHistory sends the limit to the service', u.searchParams.get('limit') === '5');
 
-  const five = await client.getHistory(5);
-  check('getHistory caps results at limit', five.length === 5);
-  check('getHistory queried the configured Safe', seenOptions.addr === SAFE);
-  check('getHistory requests executed txs', seenOptions.options.executed === true);
-  check('getHistory does NOT send the unsupported `limit` option',
-    !('limit' in seenOptions.options));
+    const all = await client.getHistory(50);
+    check('getHistory returns the whole page when limit exceeds it', all.length === 12);
 
-  const all = await client.getHistory(50);
-  check('getHistory returns the whole page when limit exceeds it', all.length === 12);
-
-  const def = await client.getHistory();
-  check('getHistory default limit (20) returns the available 12', def.length === 12);
+    const def = await client.getHistory();
+    check('getHistory default limit (20) returns the available 12', def.length === 12);
+    check('getHistory default limit is 20', urls[2].searchParams.get('limit') === '20');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 // ── Bug A: getBalance reads native balance from the provider, not a dead API ──

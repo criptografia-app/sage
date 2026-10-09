@@ -5,7 +5,7 @@
   "type": "module",
   "main": "sage.js",
   "scripts": {
-    "test": "node test/nonce-race.test.mjs && node test/keyless-exec.test.mjs",
+    "test": "node --test 'test/*.mjs'",
     "start": "node sage.js",
     "keygen": "node sage.js keygen",
     "deploy-safe": "node sage.js deploy-safe",
