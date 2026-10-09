@@ -113,7 +113,10 @@ export async function proposeBatch(client, signer, txs, opts = {}) {
     throw new Error(`proposeBatch: nextNonce() returned ${base}, which is not a usable nonce`);
   }
 
-  const plan = txs.map((_, i) => base + i);
+  // Only entries that can be proposed get a slot. A malformed entry must not consume a
+  // nonce: Safe executes strictly in nonce order, so a hole in the sequence would strand
+  // every later transaction behind it.
+  const plan = txs.filter(tx => tx && tx.to).map((_, i) => base + i);
 
   // Distinct and strictly sequential — cheap to assert, and the assertion is the point.
   const distinct = new Set(plan);
@@ -146,15 +149,39 @@ export async function proposeBatch(client, signer, txs, opts = {}) {
     }
   }
 
-  const nonce = base;
+  // The batch must stay GAPLESS. A failed proposal may or may not have occupied its slot
+  // (a timeout can land on the service anyway), so the next transaction reuses that slot
+  // only when the queue proves it is still free. Otherwise the rest of the batch is
+  // skipped: proposing past an unknown slot would create a gap or a rival, and either one
+  // makes later transactions unexecutable.
+  async function slotIsFree(n) {
+    if (typeof client.getPendingTransactions !== 'function') return false;
+    try {
+      const queued = await client.getPendingTransactions();
+      return !queued.some(t => Number(t.nonce) === n);
+    } catch { return false; }
+  }
 
   const results = [];
-  for (const [i, tx] of txs.entries()) {
-    const r = { to: tx.to, value: tx.value ?? '0' };
+  let next = base;
+  let halted = null;
+  for (const tx of txs) {
+    const r = { to: tx?.to, value: tx?.value ?? '0' };
+    if (!tx || !tx.to) {
+      r.status = 'error';
+      r.error = 'each tx needs a `to` address';
+      results.push(r);
+      continue;
+    }
+    if (halted) {
+      r.status = 'skipped';
+      r.error = halted;
+      results.push(r);
+      continue;
+    }
+    const want = next;
     try {
-      if (!tx.to) throw new Error('each tx needs a `to` address');
       const payload = { to: tx.to, value: tx.value ?? '0', data: tx.data ?? '0x' };
-      const want = plan[i];
       const res = keyless
         ? await client.proposeTransactionKeyless(payload, keyless, { nonce: want })
         : await client.proposeTransaction(payload, signer, { nonce: want });
@@ -168,10 +195,15 @@ export async function proposeBatch(client, signer, txs, opts = {}) {
       r.status = 'proposed';
       r.safeTxHash = res.safeTxHash;
       if (keyless) r.keyless = true;
+      next = want + 1;
     } catch (e) {
-      // Bulk, independent: a bad tx in the list doesn't sink the others.
+      // Bulk, independent where that is provably safe: the next tx takes this slot.
       r.status = 'error';
       r.error = e.message;
+      if (!(await slotIsFree(want))) {
+        halted = `not proposed: the proposal at nonce ${want} failed and that slot cannot ` +
+                 `be confirmed free, so proposing further would leave a nonce gap or rival`;
+      }
     }
     results.push(r);
   }

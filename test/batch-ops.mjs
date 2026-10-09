@@ -190,18 +190,55 @@ await approveAll(mockClient([tx('0xNONE')]), null, { operator: 'owner@corp.com' 
 );
 
 // ── proposeBatch: proposes each, survives a bad entry ─────────────────────────
-{
-  const proposer = {
-    async proposeTransaction(tx) {
-      if (!tx.to || tx.to === '0xbad') throw new Error('bad recipient');
-      return { proposed: true, safeTxHash: '0xhash_' + tx.to };
+/** A proposer mock: next free nonce 5, and an empty pending queue. */
+function mockProposer() {
+  const nonces = [];
+  return {
+    nonces,
+    async nextNonce() { return 5; },
+    async getPendingTransactions() { return []; },
+    async proposeTransaction(tx, _signer, { nonce }) {
+      if (tx.to === '0xbad') throw new Error('bad recipient');
+      nonces.push(nonce);
+      return { proposed: true, safeTxHash: '0xhash_' + tx.to, nonce };
     },
   };
+}
+
+{
+  const proposer = mockProposer();
   const res = await proposeBatch(proposer, SIGNER, [
     { to: '0xgood1', value: '1' }, { to: '0xbad' }, { to: '0xgood2' },
   ], { operator: 'owner@corp.com' });
   check('proposeBatch proposes the good txs', res.summary.proposed === 2);
   check('proposeBatch marks the bad one error without aborting', res.summary.error === 1);
+  check('a failed proposal leaves no nonce gap (5, 6)', JSON.stringify(proposer.nonces) === '[5,6]');
+}
+
+// A malformed entry never consumes a nonce.
+{
+  const proposer = mockProposer();
+  const res = await proposeBatch(proposer, SIGNER, [
+    { to: '0xgood1' }, { value: '1' }, { to: '0xgood2' },
+  ], {});
+  check('missing `to` is an error', res.results[1].status === 'error');
+  check('missing `to` consumes no nonce (5, 6)', JSON.stringify(proposer.nonces) === '[5,6]');
+}
+
+// If the failed slot cannot be confirmed free, the rest is skipped, not proposed past a gap.
+{
+  const proposer = mockProposer();
+  let reads = 0;
+  // First read is the up-front collision check; after that the queue is unreadable.
+  proposer.getPendingTransactions = async () => {
+    if (reads++ > 0) throw new Error('queue unreadable');
+    return [];
+  };
+  const res = await proposeBatch(proposer, SIGNER, [
+    { to: '0xgood1' }, { to: '0xbad' }, { to: '0xgood2' },
+  ], {});
+  check('unknown slot after a failure → later txs skipped', res.results[2].status === 'skipped');
+  check('unknown slot → nothing proposed past it', JSON.stringify(proposer.nonces) === '[5]');
 }
 
 await proposeBatch({}, SIGNER, [], {}).then(
