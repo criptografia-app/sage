@@ -1155,6 +1155,19 @@ async function runCLI(argv) {
     return;
   }
 
+  // Landing desk: `node sage.js settle [safeTxHash ...]` — broadcasts transactions that
+  // ALREADY meet the threshold, in nonce order. Signs nothing and adds no authority, so
+  // the desk that lands (@@GasOptimizer) never needs the power to approve.
+  if (cmd === 'settle') {
+    const only = rest.filter(a => /^0x[0-9a-fA-F]{64}$/.test(a));
+    if (rest.length && only.length !== rest.length) {
+      console.error('settle: arguments must be safeTxHashes (0x + 64 hex)'); process.exit(1);
+    }
+    const result = await handleTool('sage_settle', only.length ? { only } : {});
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   // Proposal agent: `node sage.js propose-batch '<json-array>'` (or via stdin).
   // Powers the `/proposal` skill. JSON is a list of { to, value, data }.
   if (cmd === 'propose-batch') {

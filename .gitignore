@@ -28,6 +28,9 @@ docker-compose.override.yml
 .claude/skills/bridge/
 .claude/skills/gas-optimizer/
 .claude/skills/PRIVATE/
+.claude/skills/legacy/
+.claude/skills/audit/
+.claude/skills/SAGE/
 
 # Local editor session state
 .chan/
