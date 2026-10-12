@@ -35,7 +35,7 @@ const SIGNER = { address: '0xAaAaAAAAaAAAAaAAaAAAAAAAaaAAaAAaAAaAAAaA' };
 
 /** A configurable mock SAGEClient. Records calls so we can assert on them. */
 function mockClient(pending, { details = {}, failOnSign = new Set(), failOnExec = new Set() } = {}) {
-  const calls = { signed: [], executed: [] };
+  const calls = { signed: [], signedKeyless: [], executed: [] };
   return {
     calls,
     async getPendingTransactions() { return pending; },
@@ -46,6 +46,11 @@ function mockClient(pending, { details = {}, failOnSign = new Set(), failOnExec 
       if (failOnSign.has(hash)) throw new Error('sign boom');
       calls.signed.push(hash);
       return { signed: true, safeTxHash: hash };
+    },
+    async signTransactionKeyless(hash) {
+      if (failOnSign.has(hash)) throw new Error('sign boom');
+      calls.signedKeyless.push(hash);
+      return { signed: true, safeTxHash: hash, keyless: true };
     },
     async executeTransaction(hash) {
       if (failOnExec.has(hash)) throw new Error('exec boom');
@@ -133,19 +138,107 @@ await approveAll(mockClient([]), SIGNER, {}).then(
   check('only-list restricts the batch to the named hash', res.count === 1 && res.results[0].safeTxHash === '0xH');
 }
 
-// ── proposeBatch: proposes each, survives a bad entry ─────────────────────────
+// ── hardware-2FA gate: a failed proof refuses the WHOLE batch (nothing signed) ─
 {
-  const proposer = {
-    async proposeTransaction(tx) {
-      if (!tx.to || tx.to === '0xbad') throw new Error('bad recipient');
-      return { proposed: true, safeTxHash: '0xhash_' + tx.to };
+  const client = mockClient([tx('0xJ'), tx('0xK')]);
+  const authorize = async () => { throw new Error('bad touch'); };
+  const res = await approveAll(client, SIGNER, { operator: 'owner@corp.com', authorize, proof: null });
+  check('failed 2FA → authorized:false, nothing signed', res.authorized === false && client.calls.signed.length === 0);
+  check('failed 2FA → whole batch refused in summary', res.summary.refused === 2 && res.count === 0);
+}
+
+// ── hardware-2FA gate: a valid proof lets the batch proceed ───────────────────
+{
+  const client = mockClient([tx('0xL')]);
+  let sawArgs = null;
+  const authorize = async (operator, hashes, proof) => { sawArgs = { operator, hashes, proof }; /* ok */ };
+  const res = await approveAll(client, SIGNER, { operator: 'owner@corp.com', authorize, proof: { type: 'hw-wallet' } });
+  check('valid 2FA → batch proceeds (executed)', res.results[0].status === 'executed');
+  check('2FA gate receives operator + the batch hashes + proof',
+    sawArgs.operator === 'owner@corp.com' && sawArgs.hashes[0] === '0xL' && sawArgs.proof.type === 'hw-wallet');
+}
+
+// ── keyless: signs via the vault (signTransactionKeyless), never a local key ──
+{
+  const KEYLESS = { getAddress: () => '0xVau1tOwnerAddreSSAddreSSAddreSSAddreSS00' };
+  const client = mockClient([tx('0xKL')]);
+  const res = await approveAll(client, null, { operator: 'owner@corp.com', keyless: KEYLESS });
+  const r = res.results[0];
+  check('keyless signs through the vault path', client.calls.signedKeyless.includes('0xKL'));
+  check('keyless never touches the local-key sign path', client.calls.signed.length === 0);
+  check('keyless result is marked keyless', r.keyless === true);
+  // Threshold (2/2) reached, but keyless agents cannot broadcast: sign-to-threshold,
+  // defer landing — do NOT claim "executed", and never call executeTransaction.
+  check('keyless does NOT execute (no keyless relayer)', client.calls.executed.length === 0);
+  check('keyless marks the threshold tx executable + deferred', r.status === 'signed' && r.executable === true && /deferred/.test(r.execution || ''));
+}
+
+// ── keyless: dedup uses the vault owner address, not a local wallet ────────────
+{
+  const KEYLESS = { getAddress: () => '0xVau1tOwnerAddreSSAddreSSAddreSSAddreSS00' };
+  const already = tx('0xKLD', { confirmedBy: ['0xProposer', '0xVau1tOwnerAddreSSAddreSSAddreSSAddreSS00'] });
+  const client = mockClient([already]);
+  const res = await approveAll(client, null, { operator: 'owner@corp.com', keyless: KEYLESS });
+  check('keyless skips a tx the vault owner already signed', res.results[0].status === 'skipped');
+  check('keyless skip does not re-sign', client.calls.signedKeyless.length === 0);
+}
+
+// ── approveAll with neither a local signer nor a keyless signer → throws ───────
+await approveAll(mockClient([tx('0xNONE')]), null, { operator: 'owner@corp.com' }).then(
+  () => check('approveAll without signer or keyless → throws', false),
+  (e) => check('approveAll without signer or keyless → throws', /local `signer` or .*keyless/.test(e.message)),
+);
+
+// ── proposeBatch: proposes each, survives a bad entry ─────────────────────────
+/** A proposer mock: next free nonce 5, and an empty pending queue. */
+function mockProposer() {
+  const nonces = [];
+  return {
+    nonces,
+    async nextNonce() { return 5; },
+    async getPendingTransactions() { return []; },
+    async proposeTransaction(tx, _signer, { nonce }) {
+      if (tx.to === '0xbad') throw new Error('bad recipient');
+      nonces.push(nonce);
+      return { proposed: true, safeTxHash: '0xhash_' + tx.to, nonce };
     },
   };
+}
+
+{
+  const proposer = mockProposer();
   const res = await proposeBatch(proposer, SIGNER, [
     { to: '0xgood1', value: '1' }, { to: '0xbad' }, { to: '0xgood2' },
   ], { operator: 'owner@corp.com' });
   check('proposeBatch proposes the good txs', res.summary.proposed === 2);
   check('proposeBatch marks the bad one error without aborting', res.summary.error === 1);
+  check('a failed proposal leaves no nonce gap (5, 6)', JSON.stringify(proposer.nonces) === '[5,6]');
+}
+
+// A malformed entry never consumes a nonce.
+{
+  const proposer = mockProposer();
+  const res = await proposeBatch(proposer, SIGNER, [
+    { to: '0xgood1' }, { value: '1' }, { to: '0xgood2' },
+  ], {});
+  check('missing `to` is an error', res.results[1].status === 'error');
+  check('missing `to` consumes no nonce (5, 6)', JSON.stringify(proposer.nonces) === '[5,6]');
+}
+
+// If the failed slot cannot be confirmed free, the rest is skipped, not proposed past a gap.
+{
+  const proposer = mockProposer();
+  let reads = 0;
+  // First read is the up-front collision check; after that the queue is unreadable.
+  proposer.getPendingTransactions = async () => {
+    if (reads++ > 0) throw new Error('queue unreadable');
+    return [];
+  };
+  const res = await proposeBatch(proposer, SIGNER, [
+    { to: '0xgood1' }, { to: '0xbad' }, { to: '0xgood2' },
+  ], {});
+  check('unknown slot after a failure → later txs skipped', res.results[2].status === 'skipped');
+  check('unknown slot → nothing proposed past it', JSON.stringify(proposer.nonces) === '[5]');
 }
 
 await proposeBatch({}, SIGNER, [], {}).then(

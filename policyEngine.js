@@ -1,4 +1,32 @@
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  SAGE — the agentic wallet for Safe multisig.
+ *  A product of CRIPTOGRAFIA CAPITAL, and the foundation of
+ *  CRIPTOGRAFIA PRIVATE (Non-Custodial Agentic Wealth Management).
+ *
+ *  Copyright (c) 2026 CRIPTOGRAFIA Capital.
+ *  Released under the MIT License. Free, sovereign, bring-your-own-key.
+ *
+ *  NON-CUSTODIAL. CRIPTOGRAFIA Capital never takes custody of your assets.
+ *  Funds are held solely by your own Safe multisig smart contract. Agent keys
+ *  are yours: encrypted at rest locally, or held in a vault you control. You
+ *  can always recover and operate your Safe with no vendor present. This
+ *  software creates no custodial relationship.
+ *
+ *  FAIL-CLOSED BY DESIGN. Agents propose; they do not unilaterally move funds.
+ *  Execution requires the Safe's threshold of signatures plus the owner's
+ *  authenticated instruction. Any unknown, stale, unverifiable or
+ *  out-of-policy fact must resolve to HOLD, never to proceed. Do not modify
+ *  this file in a way that weakens that guarantee.
+ *
+ *  NO WARRANTY; NOT FINANCIAL, LEGAL OR TAX ADVICE. Provided "AS IS", without
+ *  warranty of any kind, express or implied. Distributed-ledger transactions
+ *  are irreversible and may result in total loss of funds. You are solely
+ *  responsible for your own regulatory, KYC/AML, sanctions and tax
+ *  obligations. See LICENSE for the full terms.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+/**
  * SAGE — Policy Engine
  *
  * Decides whether an agent should auto-sign a pending Safe transaction
@@ -144,7 +172,7 @@ export const DECISION = {
  * resolves to HOLD_HUMAN.
  *
  * @param {object} tx         - the decoded transaction proposal
- * @param {object} context    - { kyc_verified, aml_clear, value_usd, token, is_new_address }
+ * @param {object} context    - { kyc_verified, aml_clear, value_usd, token, is_new_address, now }
  * @param {string} agentRole  - 'compliance' | 'execution'
  * @returns {{ decision: string, reasons: string[] }}
  */
@@ -173,6 +201,13 @@ function decide(tx, context, agentRole) {
     };
   }
 
+  // `context.now` lets callers (and tests) pin the clock. The operating-hours
+  // gate is time-dependent, so without an injection point it could neither be
+  // tested deterministically nor overridden for backfills. Read through own()
+  // like every other context field; defaults to the real clock.
+  const nowIn = own(context, 'now');
+  const now = nowIn instanceof Date ? nowIn : new Date();
+
   // ── Hard rejects ────────────────────────────────────────────────────────
   // Any truthy flag rejects — this is the one gate where a sloppy value is
   // safe to honour, because honouring it refuses to sign.
@@ -181,6 +216,9 @@ function decide(tx, context, agentRole) {
   }
 
   // ── Always require human ─────────────────────────────────────────────────
+  // Value gate — FAIL CLOSED. A value we could not establish is held for a human,
+  // never treated as "under the limit": `undefined > limit` is false, so without
+  // this guard an unverifiable value would satisfy every ceiling below.
   const valueUsd = own(context, 'value_usd');
   if (!isVerifiedAmount(valueUsd)) {
     reasons.push(`value_usd is not a verified amount (got ${describe(valueUsd)})`);
@@ -193,7 +231,6 @@ function decide(tx, context, agentRole) {
       ? 'destination address never seen before'
       : 'destination address not verified as previously seen');
   }
-  const now  = new Date();
   // BRT = UTC-3. The old `getUTCHours() - 3` underflowed to negative values
   // before 03:00 UTC (e.g. 01:00 UTC → -2), silently breaking the comparison.
   // The `+ 24) % 24` keeps it in 0–23. (getDay() is still machine-local — a

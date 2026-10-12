@@ -1,0 +1,21 @@
+# SECURITY: never bake secrets or local state into the image. Agent keys and
+# passphrases are mounted at runtime (see docker-compose.yml), never COPY'd.
+.sage-key-*.enc
+.sage-passphrases.txt
+.env
+*.env
+authz-devices.json
+sage-audit.log
+
+# Proprietary / internal — must not leak into the SAGE image
+PRIVATE/
+Exchange/
+.chan/
+
+# Build noise
+.git/
+node_modules/
+web/node_modules/
+web/.next/
+docker-compose.override.yml
+.DS_Store

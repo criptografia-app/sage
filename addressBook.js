@@ -1,4 +1,32 @@
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  SAGE — the agentic wallet for Safe multisig.
+ *  A product of CRIPTOGRAFIA CAPITAL, and the foundation of
+ *  CRIPTOGRAFIA PRIVATE (Non-Custodial Agentic Wealth Management).
+ *
+ *  Copyright (c) 2026 CRIPTOGRAFIA Capital.
+ *  Released under the MIT License. Free, sovereign, bring-your-own-key.
+ *
+ *  NON-CUSTODIAL. CRIPTOGRAFIA Capital never takes custody of your assets.
+ *  Funds are held solely by your own Safe multisig smart contract. Agent keys
+ *  are yours: encrypted at rest locally, or held in a vault you control. You
+ *  can always recover and operate your Safe with no vendor present. This
+ *  software creates no custodial relationship.
+ *
+ *  FAIL-CLOSED BY DESIGN. Agents propose; they do not unilaterally move funds.
+ *  Execution requires the Safe's threshold of signatures plus the owner's
+ *  authenticated instruction. Any unknown, stale, unverifiable or
+ *  out-of-policy fact must resolve to HOLD, never to proceed. Do not modify
+ *  this file in a way that weakens that guarantee.
+ *
+ *  NO WARRANTY; NOT FINANCIAL, LEGAL OR TAX ADVICE. Provided "AS IS", without
+ *  warranty of any kind, express or implied. Distributed-ledger transactions
+ *  are irreversible and may result in total loss of funds. You are solely
+ *  responsible for your own regulatory, KYC/AML, sanctions and tax
+ *  obligations. See LICENSE for the full terms.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+/**
  * SAGE — Address Book
  *
  * A named registry of recipients so the proposal agent can resolve a human
