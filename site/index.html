@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SAGE — The agentic wallet for Safe multisig</title>
+<meta name="description" content="Two AI co-signers on your Safe multisig. A policy engine with no model in it decides what they may sign. Out of the box, they sign nothing. Free and MIT-licensed.">
+<link rel="canonical" href="https://sage.criptografia.app/">
+<meta name="theme-color" content="#0B1220">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SAGE by CRIPTOGRAFIA">
+<meta property="og:title" content="SAGE — The agentic wallet for Safe multisig">
+<meta property="og:description" content="Your agents. Your keys. Your rules. AI co-signers that, by default, sign nothing.">
+<meta property="og:url" content="https://sage.criptografia.app/">
+<meta property="og:image" content="https://sage.criptografia.app/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="SAGE: AI co-signers on your multisig. Out of the box, they sign nothing.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.ico" sizes="48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="img/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="img/favicon-16.png">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="head">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="SAGE, home">
+      <img src="img/mark.png" alt="" width="36" height="36">
+      <span>SAGE</span><small>by CRIPTOGRAFIA</small>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="#how">How it signs</a>
+      <a href="#policy">Policy</a>
+      <a href="#safety">Safety</a>
+      <a href="#editions">Editions</a>
+      <a class="btn btn-green" href="https://github.com/criptografia-app/sage">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Free · MIT-licensed · Safe{Core}</p>
+      <h1>AI co-signers on your multisig.<br><span>Out of the box, they sign nothing.</span></h1>
+      <p class="lede">SAGE puts two AI agents on a 2-of-3 Safe next to you. They read the real transaction, check it against <em>your</em> policy, and either co-sign, hold it for you, or refuse. The policy engine has no model in it. The model can propose and explain. It never decides.</p>
+      <div class="cta">
+        <a class="btn btn-green" href="https://github.com/criptografia-app/sage">Get SAGE on GitHub</a>
+        <a class="btn btn-ghost" href="#how">How a signature happens</a>
+      </div>
+      <p class="tag">Your agents. Your keys. Your rules.</p>
+    </div>
+    <figure class="safe" aria-label="A 2-of-3 Safe: you plus two AI co-signers">
+      <div class="safe-top">Safe multisig · threshold <b>2 of 3</b></div>
+      <div class="owner you"><span class="dot"></span><div><b>You</b><small>hardware wallet / MetaMask</small></div><em>owner 1</em></div>
+      <div class="owner"><span class="dot g"></span><div><b>agent-compliance</b><small>SAGE-managed key</small></div><em>owner 2</em></div>
+      <div class="owner"><span class="dot g"></span><div><b>agent-execution</b><small>SAGE-managed key</small></div><em>owner 3</em></div>
+      <p class="safe-note">No single key moves funds. An agent signature is never enough on its own.</p>
+    </figure>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <p class="eyebrow">How a signature happens</p>
+    <h2>Ground truth, not caller claims.</h2>
+    <p class="sub">When you ask SAGE to approve, it ignores whatever the caller says about the transaction and works from the chain's own record.</p>
+    <ol class="steps">
+      <li><b>Fetch</b><span>the real pending transaction from the Safe Transaction Service.</span></li>
+      <li><b>Decode</b><span>the native value, plus any ERC-20 transfer hidden in the calldata.</span></li>
+      <li><b>Evaluate</b><span>a trusted context built only from those facts against the owner's policy.</span></li>
+      <li><b>Verify</b><span>on AUTO_SIGN, rebuild the exact tx, re-derive the EIP-712 SafeTx hash, and refuse on any mismatch.</span></li>
+    </ol>
+  </div>
+</section>
+
+<section class="alt" id="policy">
+  <div class="wrap two">
+    <div>
+      <p class="eyebrow">Where the agent's authority ends</p>
+      <h2>Not in the prompt. In config you own.</h2>
+      <p class="sub">Every pending transaction gets exactly one of three outcomes, and an unknown fact always resolves to <b>hold</b>.</p>
+      <ul class="verdicts">
+        <li><code class="v-auto">AUTO_SIGN</code> every policy condition is met on the real transaction</li>
+        <li><code class="v-hold">HOLD_HUMAN</code> over a limit, unknown value, off-hours, new address, KYC/AML not clear</li>
+        <li><code class="v-rej">REJECT</code> an AML flag on the address or amount</li>
+      </ul>
+    </div>
+    <pre class="code" aria-label="Example policy"><span class="c">// sage-config.json · example policy</span>
+"auto_sign": {
+  "max_value_usd": <b>3000</b>,
+  "allowed_tokens": ["USDT","USDC","ETH","BNB"],
+  "requires_kyc": true,
+  "requires_aml_clear": true,
+  "allowed_hours": { "start": 9, "end": 18 },
+  "allowed_days": [1,2,3,4,5]
+},
+"always_human": {
+  "above_usd": <b>10000</b>,
+  "new_address": true,
+  "aml_flagged": true,
+  "outside_hours": true
+}</pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Fail-closed by design</p>
+    <h2>The default install feels useless. That is the point.</h2>
+    <div class="cards">
+      <div class="card"><h3>No oracle, no auto-sign</h3><p>There is no price oracle in scope, so a transaction's USD value is <em>unknown</em>, and unknown can never slip under a limit.</p></div>
+      <div class="card"><h3>Compliance starts closed</h3><p>KYC/AML is treated as unverified until you wire a real provider. Until then every payment waits for you.</p></div>
+      <div class="card"><h3>Loosen one rule at a time</h3><p>You relax policy deliberately, and every decision lands in an append-only audit log.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="safety">
+  <div class="wrap">
+    <p class="eyebrow">Even a compromised agent can't steal</p>
+    <h2>Three walls between an agent and your funds.</h2>
+    <div class="cards">
+      <div class="card"><h3>Keyless signing</h3><p>The agent computes the EIP-712 hash and asks a vault (Warden, HashiCorp Vault Transit, a KMS) for a signature. The key never enters the agent's process, and a signature that doesn't recover to the expected owner is refused.</p></div>
+      <div class="card"><h3>The threshold</h3><p>2-of-3 means no agent reaches the threshold alone. The proposal agent can propose and never co-sign to threshold, and vice versa, each in its own container.</p></div>
+      <div class="card"><h3>Hardware 2FA</h3><p>Owner approval can require a Trezor or YubiKey touch, bound to the exact batch of transaction hashes, valid for a short TTL, with its nonce burned on use.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="editions">
+  <div class="wrap">
+    <p class="eyebrow">Two editions, one engine</p>
+    <h2>SAGE is the foundation you can inspect.</h2>
+    <p class="sub">CRIPTOGRAFIA PRIVATE is the private bank built on top of it, for families and companies.</p>
+    <div class="table" role="table" aria-label="SAGE versus PRIVATE">
+      <div class="row th" role="row"><span role="columnheader"></span><span role="columnheader">SAGE</span><span role="columnheader">PRIVATE</span></div>
+      <div class="row" role="row"><span role="rowheader">What it is</span><span>An agentic wallet: two AI co-signers on a Safe</span><span>A private bank: a team of specialist desks on your multisig</span></div>
+      <div class="row" role="row"><span role="rowheader">Agents</span><span>Proposal + Signer</span><span>12 desks, from Concierge and Compliance to Watchtower and Legacy</span></div>
+      <div class="row" role="row"><span role="rowheader">Chains</span><span>EVM (Safe{Core})</span><span>Any EVM chain or fork, plus Bitcoin</span></div>
+      <div class="row" role="row"><span role="rowheader">Keys</span><span>Local encrypted keystore, or keyless</span><span>Keyless only</span></div>
+      <div class="row" role="row"><span role="rowheader">Owner approval</span><span>Authenticated operator + optional hardware 2FA</span><span>Passkey approval derived from the transaction itself</span></div>
+      <div class="row" role="row"><span role="rowheader">For</span><span>Individuals and builders</span><span>Families, family offices, companies</span></div>
+      <div class="row" role="row"><span role="rowheader">Price</span><span><b class="g">Free</b></span><span>Bespoke onboarding and support</span></div>
+    </div>
+    <div class="cta center">
+      <a class="btn btn-green" href="https://github.com/criptografia-app/sage">Get SAGE</a>
+      <a class="btn btn-ghost dark" href="https://private.criptografia.app/">Meet PRIVATE</a>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap two">
+    <div>
+      <p class="eyebrow">Run it</p>
+      <h2>Talk to your wallet from Claude.</h2>
+      <p class="sub">SAGE is an MCP server (JSON-RPC over stdio) and a CLI. It runs as a single process or in Docker, on Ethereum Sepolia today.</p>
+      <p class="sub small">Still unfinished, and said plainly: compliance is a stub until a real KYC/AML provider is wired in.</p>
+    </div>
+    <pre class="code" aria-label="Quick start">git clone https://github.com/criptografia-app/sage
+cd sage
+npm install
+npm test        <span class="c"># offline suites, no funds needed</span>
+node setup.js   <span class="c"># agent keys, added as owners, 2-of-3</span>
+
+<span class="c"># then point Claude Desktop at the MCP server:</span>
+<span class="c"># "command": "node", "args": ["/path/to/sage/sage.js"]</span></pre>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="brand"><img src="img/mark.png" alt="" width="28" height="28"><span>SAGE</span><small>by CRIPTOGRAFIA</small></div>
+    <p>Non-custodial. Funds are held solely by your own Safe multisig; agent keys are yours. MIT License, provided as is, with no warranty. Not financial, legal or tax advice. Distributed-ledger transactions are irreversible.</p>
+    <p><a href="https://criptografia.app/">criptografia.app</a> · <a href="https://private.criptografia.app/">PRIVATE</a> · <a href="mailto:marco@criptografia.app">marco@criptografia.app</a></p>
+  </div>
+</footer>
+</body>
+</html>
