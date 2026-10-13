@@ -65,14 +65,21 @@ async function runTool(name, args) {
 }
 
 // ── provider adapters ───────────────────────────────────────────────────────
+function apiError(res, j) {
+  const e = Array.isArray(j) ? j[0]?.error : j?.error;
+  const err = new Error(e?.message || (typeof e === 'string' ? e : '') || `HTTP ${res.status}`);
+  err.status = res.status;
+  return err;
+}
+const anthHeaders = (cfg) => ({ 'x-api-key': cfg.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true',
+  ...(cfg.workspace ? { 'anthropic-workspace-id': cfg.workspace } : {}) });
 async function callAnthropic(cfg, messages) {
   const res = await fetch(`${cfg.base}/messages`, { method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': cfg.key, 'anthropic-version': '2023-06-01',
-               'anthropic-dangerous-direct-browser-access': 'true' },
+    headers: { 'content-type': 'application/json', ...anthHeaders(cfg) },
     body: JSON.stringify({ model: cfg.model, max_tokens: 1024, system: SYSTEM, messages,
       tools: TOOLS.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters })) }) });
-  const j = await res.json();
-  if (!res.ok) throw new Error(j.error?.message || `HTTP ${res.status}`);
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw apiError(res, j);
   return j;
 }
 async function callOpenAI(cfg, messages) {
@@ -80,18 +87,40 @@ async function callOpenAI(cfg, messages) {
     headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
     body: JSON.stringify({ model: cfg.model, messages: [{ role: 'system', content: SYSTEM }, ...messages],
       tools: TOOLS.map((t) => ({ type: 'function', function: t })) }) });
-  const j = await res.json();
-  if (!res.ok) throw new Error(j.error?.message || (typeof j.error === 'string' ? j.error : '') || `HTTP ${res.status}`);
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw apiError(res, j);
   return j;
 }
 async function listModels(cfg) {
   const anth = cfg.api === 'anthropic';
-  const res = await fetch(`${cfg.base}/models`, { headers: anth
-    ? { 'x-api-key': cfg.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }
-    : { authorization: `Bearer ${cfg.key}` } });
+  const res = await fetch(`${cfg.base}/models`, { headers: anth ? anthHeaders(cfg) : { authorization: `Bearer ${cfg.key}` } });
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(j.error?.message || `HTTP ${res.status}`);
+  if (!res.ok) throw apiError(res, j);
   return (j.data || j.models || []).map((m) => (m.id || m.name || '').replace(/^models\//, '')).filter(Boolean);
+}
+
+// Model names change often. If the provider says the model doesn't exist, ask it which
+// models this key can use, pick a sensible chat model, and retry once.
+const PREFER = { claude: [/haiku/, /sonnet/], openai: [/^gpt-4o-mini$/, /^gpt-.*mini/, /^gpt-/], gemini: [/flash/, /pro/], grok: [/mini/, /grok/] };
+const SKIP = /image|tts|embed|live|audio|vision|aqa|learnlm|gemma|search|realtime|transcribe|moderation|dall|whisper|instruct|preview-tts|exp-/i;
+function pickModel(id, models) {
+  const usable = models.filter((m) => !SKIP.test(m)).sort().reverse();
+  for (const re of PREFER[id] || []) { const m = usable.find((x) => re.test(x)); if (m) return m; }
+  return usable[0];
+}
+async function call(cfg, messages) {
+  const fn = cfg.api === 'anthropic' ? callAnthropic : callOpenAI;
+  try { return await fn(cfg, messages); }
+  catch (e) {
+    if (!(e.status === 404 || /model.*(not found|not exist|invalid|unknown|not supported)/i.test(e.message)) || cfg.retried || PROVIDERS[active].custom) throw e;
+    const next = pickModel(active, await listModels(cfg));
+    if (!next || next === cfg.model) throw e;
+    cfg.model = next; cfg.retried = true;
+    $('ai-model').value = next;
+    store.set(`sage-ai:model:${active}`, next, true);
+    $('ai-status').textContent = `Model not available; switched to ${next}.`;
+    return fn(cfg, messages);
+  }
 }
 
 // One conversation, kept in each API's own shape.
@@ -100,7 +129,7 @@ async function turn(cfg, userText, onTool) {
   if (cfg.api === 'anthropic') {
     history.push({ role: 'user', content: userText });
     for (let i = 0; i < 8; i++) {
-      const r = await callAnthropic(cfg, history);
+      const r = await call(cfg, history);
       history.push({ role: 'assistant', content: r.content });
       const uses = r.content.filter((c) => c.type === 'tool_use');
       if (!uses.length) return r.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
@@ -111,7 +140,7 @@ async function turn(cfg, userText, onTool) {
   } else {
     history.push({ role: 'user', content: userText });
     for (let i = 0; i < 8; i++) {
-      const r = await callOpenAI(cfg, history);
+      const r = await call(cfg, history);
       const msg = r.choices[0].message;
       history.push({ role: 'assistant', content: msg.content || '', ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}) });
       if (!msg.tool_calls?.length) return msg.content || '';
@@ -143,6 +172,7 @@ const keyFor = (id) => store.get(`sage-ai:key:${id}`) || '';
 function cfg() {
   const p = PROVIDERS[active];
   return { ...p, key: $('ai-key').value.trim(), model: $('ai-model').value.trim() || p.model,
+           workspace: p.api === 'anthropic' ? $('ai-ws').value.trim() : '',
            base: p.custom ? ($('ai-base').value.trim() || p.base).replace(/\/$/, '') : p.base };
 }
 function selectProvider(id) {
@@ -155,6 +185,8 @@ function selectProvider(id) {
   $('ai-model').value = store.get(`sage-ai:model:${id}`) || p.model;
   $('ai-models').innerHTML = p.models.map((m) => `<option value="${esc(m)}">`).join('');
   $('ai-base-row').hidden = !p.custom;
+  $('ai-ws-row').hidden = p.api !== 'anthropic';
+  $('ai-ws').value = store.get('sage-ai:ws') || '';
   if (p.custom) $('ai-base').value = store.get('sage-ai:base') || p.base;
   $('ai-remember').checked = !!(() => { try { return localStorage.getItem(`sage-ai:key:${id}`); } catch { return null; } })();
   store.set('sage-ai:provider', id, true);
@@ -166,6 +198,7 @@ function saveKey() {
   if (c.key) store.set(`sage-ai:key:${active}`, c.key, remember); else store.del(`sage-ai:key:${active}`);
   store.set(`sage-ai:model:${active}`, c.model, true);
   if (PROVIDERS[active].custom) store.set('sage-ai:base', c.base, true);
+  if (c.workspace) store.set('sage-ai:ws', c.workspace, true); else if (PROVIDERS[active].api === 'anthropic') store.del('sage-ai:ws');
 }
 
 function bubble(role, html) {
