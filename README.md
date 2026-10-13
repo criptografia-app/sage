@@ -201,7 +201,7 @@ co-signature.** This is what makes it hands-free without being unguarded:
 
 > This is a distinct, explicitly-operator-authorized path — separate from the
 > autonomous, fail-closed `sage_approve`. It does **not** reopen the caller-context
-> bypass closed in TOKEN-67: policy still evaluates on the *real* on-chain tx; the
+> bypass closed by the correctness fixes (see Correctness below): policy still evaluates on the *real* on-chain tx; the
 > operator's authenticated identity, not caller-supplied facts, is what authorizes.
 
 Execution is **bulk but independent**: `/signer` signs every approved tx and
@@ -442,7 +442,7 @@ passphrase is never written to disk; it's supplied via `SAGE_PASSPHRASE_<AGENT>`
 
 ---
 
-## Correctness (TOKEN-67)
+## Correctness
 
 SAGE's signing path and its policy gate were hardened and locked with offline tests. The
 bugs that were found and fixed:
@@ -608,7 +608,7 @@ decision, backed by the audit log and the test suite above.
 When a trade is confirmed at the OTC desk (`POST /api/confirm`), the intended flow is:
 propose a Safe transfer to the customer → agent-compliance runs KYC/AML → if within
 policy, agent-execution co-signs → 2-of-3 reached → Safe executes → receipt updated with
-the on-chain tx hash. (CRIPTO-181.)
+the on-chain tx hash.
 
 ---
 
@@ -635,22 +635,6 @@ sage/
 ├── web/              Next.js + Privy frontend for the hosted agents
 ├── Dockerfile · docker-compose.yml · .env.example
 ```
-
----
-
-## Tickets
-
-Internal tracker IDs, for reference.
-
-| Ticket | Topic |
-|--------|-------|
-| TOKEN-67 | Signing correctness + policy-bypass fixes |
-| CRIPTO-177 | Safe deployment (testnet → Polygon) |
-| CRIPTO-178 | Safe SDK integration |
-| CRIPTO-179 | Policy engine |
-| CRIPTO-180 | MCP server tools |
-| CRIPTO-181 | P2P desk integration |
-| CRIPTO-182 | Daemon + monitoring |
 
 ---
 
