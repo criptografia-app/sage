@@ -34,6 +34,15 @@ const short = (a) => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : '';
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const reader = new ethers.JsonRpcProvider(RPC, Number(CHAIN_ID), { staticNetwork: true });
 
+// Wallets poll for receipts slowly (or not at all once the popup closes), so confirm on
+// the public node instead, and say so plainly if Sepolia is slow.
+async function confirmed(hash) {
+  const rc = await reader.waitForTransaction(hash, 1, 240_000);
+  if (!rc) throw new Error(`Still pending after 4 minutes. Check it on Etherscan: ${EXPLORER}/tx/${hash}`);
+  if (rc.status === 0) throw new Error(`The transaction reverted: ${EXPLORER}/tx/${hash}`);
+  return rc;
+}
+
 const S = { eip1193: null, signer: null, me: null, agents: null, safe: null, pending: null };
 
 // ── storage (best effort; the demo still works for the session without it) ──
@@ -59,9 +68,15 @@ function busy(btn, on, text) {
 function fail(e, btn) {
   if (btn) busy(btn, false);
   const msg = e?.shortMessage || e?.info?.error?.message || e?.message || String(e);
-  log(/user (rejected|denied)|ACTION_REJECTED/i.test(msg) ? 'You cancelled in your wallet.' : `Error: ${esc(msg)}`, 'bad');
+  log(/user (rejected|denied)|ACTION_REJECTED/i.test(msg) ? 'You cancelled in your wallet.'
+    : /insufficient funds|missing revert data/i.test(msg) ? `Your wallet rejected it (${esc(msg)}). Check that it is on Sepolia and has test ETH, then try again.`
+    : `Error: ${esc(msg)}`, 'bad');
 }
 function step(n) {
+  // A step's button only works once the steps before it are done.
+  if ($('btn-deploy').textContent !== 'Deployed') $('btn-deploy').disabled = n < 2;
+  $('btn-fund').disabled = n < 3;
+  $('btn-propose').disabled = n < 3;
   document.querySelectorAll('.try-step').forEach((el) => {
     const k = Number(el.dataset.step);
     el.classList.toggle('done', k < n);
@@ -106,11 +121,13 @@ async function connect() {
     };
     S.safe = saved?.safe || null;
     save();
-    const bal = await reader.getBalance(S.me);
-    $('me').innerHTML = `${addrLink(S.me)} · ${Number(ethers.formatEther(bal)).toFixed(4)} Sepolia ETH`;
     $('agent-p').innerHTML = addrLink(S.agents.proposal.address);
     $('agent-s').innerHTML = addrLink(S.agents.signer.address);
+    $('me').innerHTML = addrLink(S.me);
     btn.textContent = 'Connected';
+    step(S.safe ? 3 : 2);
+    const bal = await reader.getBalance(S.me);
+    $('me').innerHTML = `${addrLink(S.me)} · ${Number(ethers.formatEther(bal)).toFixed(4)} Sepolia ETH`;
     log(`Connected ${addrLink(S.me)}. Two demo agents created in this tab.`);
     if (bal < ethers.parseEther('0.003')) {
       log('You need a little Sepolia ETH for gas (about 0.003). Free faucets: <a href="https://cloud.google.com/application/web3/faucet/ethereum/sepolia" target="_blank" rel="noopener">Google</a>, <a href="https://www.alchemy.com/faucets/ethereum-sepolia" target="_blank" rel="noopener">Alchemy</a>.', 'warn');
@@ -120,18 +137,41 @@ async function connect() {
   } catch (e) { fail(e, btn); }
 }
 
+// Every transaction goes through here. Wallets can drift to another network per site,
+// and their own gas estimate then fails with misleading errors ("insufficient funds",
+// "missing revert data"). So: re-check the network, estimate on the public Sepolia
+// node, and hand the wallet a ready gas limit.
+async function sendTx(req) {
+  let id = await S.eip1193.request({ method: 'eth_chainId' });
+  if (id !== '0xaa36a7') {
+    log('Your wallet is on another network. Switching it back to Sepolia…', 'warn');
+    await S.eip1193.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0xaa36a7' }] });
+    id = await S.eip1193.request({ method: 'eth_chainId' });
+    if (id !== '0xaa36a7') throw new Error('Please switch your wallet to Sepolia and try again.');
+  }
+  S.signer = await new ethers.BrowserProvider(S.eip1193).getSigner();
+  if ((await S.signer.getAddress()).toLowerCase() !== S.me.toLowerCase()) throw new Error('Your wallet switched accounts. Reload the page.');
+  const full = { from: S.me, to: req.to, data: req.data || '0x', value: req.value || 0n };
+  const [bal, est] = await Promise.all([reader.getBalance(S.me), reader.estimateGas(full).catch((e) => { throw new Error(`This would fail on Sepolia: ${e.shortMessage || e.message}`); })]);
+  const fee = await reader.getFeeData();
+  const need = est * 13n / 10n * (fee.maxFeePerGas || fee.gasPrice || 0n) + (req.value || 0n);
+  if (bal < need) throw new Error(`Your wallet has ${ethers.formatEther(bal)} Sepolia ETH and this needs about ${Number(ethers.formatEther(need)).toFixed(5)}. Get test ETH from a faucet.`);
+  return S.signer.sendTransaction({ to: req.to, data: full.data, value: full.value, gasLimit: est * 13n / 10n });
+}
+
 // ── 2. deploy ───────────────────────────────────────────────────────────────
 async function deploy() {
   const btn = $('btn-deploy');
+  if (!S.agents) { log('Connect your wallet first (step 1).', 'warn'); return; }
   busy(btn, true);
   try {
     const owners = [S.me, S.agents.proposal.address, S.agents.signer.address];
     const init = new ethers.Interface(SAFE_ABI).encodeFunctionData('setup', [owners, 2, ZERO, '0x', FALLBACK, ZERO, 0, ZERO]);
-    const factory = new ethers.Contract(FACTORY, FACTORY_ABI, S.signer);
-    const tx = await factory.createProxyWithNonce(SINGLETON_L2, init, BigInt(Date.now()));
+    const factory = new ethers.Contract(FACTORY, FACTORY_ABI, reader);
+    const tx = await sendTx({ to: FACTORY, data: factory.interface.encodeFunctionData('createProxyWithNonce', [SINGLETON_L2, init, BigInt(Date.now())]) });
     btn.textContent = 'Deploying…';
     log(`Deploying your Safe: ${txLink(tx.hash)}`);
-    const rc = await tx.wait();
+    const rc = await confirmed(tx.hash);
     const ev = rc.logs.map((l) => { try { return factory.interface.parseLog(l); } catch { return null; } }).find((x) => x?.name === 'ProxyCreation');
     S.safe = ethers.getAddress(ev.args.proxy);
     save();
@@ -154,12 +194,13 @@ async function showSafe() {
 // ── 3. fund ─────────────────────────────────────────────────────────────────
 async function fund() {
   const btn = $('btn-fund');
+  if (!S.safe) { log(S.agents ? 'Deploy your Safe first (step 2).' : 'Connect your wallet first (step 1).', 'warn'); return; }
   busy(btn, true);
   try {
-    const tx = await S.signer.sendTransaction({ to: S.safe, value: ethers.parseEther($('fund-amt').value || '0.001') });
+    const tx = await sendTx({ to: S.safe, value: ethers.parseEther($('fund-amt').value || '0.001') });
     btn.textContent = 'Sending…';
     log(`Funding your Safe: ${txLink(tx.hash)}`);
-    await tx.wait();
+    await confirmed(tx.hash);
     busy(btn, false);
     log('Your Safe is funded.', 'good');
     await showSafe();
@@ -250,11 +291,11 @@ async function execute() {
     const { message: m, sigs, hash } = S.pending;
     // The Safe requires signatures ordered by owner address, ascending.
     const packed = '0x' + Object.keys(sigs).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1)).map((a) => sigs[a].slice(2)).join('');
-    const safe = new ethers.Contract(S.safe, SAFE_ABI, S.signer);
-    const tx = await safe.execTransaction(m.to, m.value, m.data, m.operation, m.safeTxGas, m.baseGas, m.gasPrice, m.gasToken, m.refundReceiver, packed);
+    const data = new ethers.Interface(SAFE_ABI).encodeFunctionData('execTransaction', [m.to, m.value, m.data, m.operation, m.safeTxGas, m.baseGas, m.gasPrice, m.gasToken, m.refundReceiver, packed]);
+    const tx = await sendTx({ to: S.safe, data });
     if (btn) btn.textContent = 'Executing…';
     log(`Submitted: ${txLink(tx.hash)}`);
-    const rc = await tx.wait();
+    const rc = await confirmed(tx.hash);
     const ok = rc.logs.some((l) => l.address.toLowerCase() === S.safe.toLowerCase() && l.topics[0] === ethers.id('ExecutionSuccess(bytes32,uint256)') && l.topics[1] === hash);
     if (!ok) throw new Error('The Safe did not report ExecutionSuccess.');
     log(`Executed on Sepolia. ${ethers.formatEther(m.value)} ETH moved to ${addrLink(m.to)}. ${txLink(tx.hash)}`, 'good');
