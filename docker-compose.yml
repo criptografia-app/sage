@@ -24,7 +24,7 @@ services:
       # Notification bridges (optional — for HOLD_HUMAN alerts)
       WHATSAPP_BRIDGE_URL:           ${WHATSAPP_BRIDGE_URL:-http://criptografia-p2p:3001/api/bot/send}
       WHATSAPP_BRIDGE_SECRET:        ${WHATSAPP_BRIDGE_SECRET:-}
-      NOTIFY_PHONE:                  ${NOTIFY_PHONE:-+5548991703924}
+      NOTIFY_PHONE:                  ${NOTIFY_PHONE:-}
     volumes:
       # Encrypted agent keys — mounted from host, never inside the image
       - ${SAGE_KEYS_DIR:-./keys}:/app/keys:ro
@@ -154,7 +154,7 @@ services:
   # NOT part of the running stack (profile-gated). Use it to inspect/migrate a
   # Safe's mastercopy version:
   #   docker compose run --rm safe-cli \
-  #     0xe601D7B4103FD508dA521A25D7639F085448196d https://polygon-bor-rpc.publicnode.com
+  #     0xYOUR_SAFE_ADDRESS https://polygon-bor-rpc.publicnode.com
   safe-cli:
     image: safeglobal/safe-cli
     profiles: ["tools"]

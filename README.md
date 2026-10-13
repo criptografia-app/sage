@@ -1,4 +1,23 @@
-# SAGE — Agentic Wallet
+<p align="center">
+  <img src="site/img/mark.png" width="96" alt="">
+</p>
+
+<h1 align="center">SAGE — Agentic Wallet</h1>
+
+<p align="center">
+  <b>Two AI co-signers on your Safe. Out of the box, they sign nothing.</b><br>
+  <a href="https://sage.criptografia.app/app/">Try it on Sepolia</a> ·
+  <a href="https://sage.criptografia.app/app/#how-video">Watch the tour</a> ·
+  <a href="https://sage.criptografia.app">Website</a> ·
+  MIT licensed
+</p>
+
+<p align="center">
+  <a href="https://sage.criptografia.app/app/#how-video">
+    <img src="docs/img/tour-play.png" width="820" alt="Play the SAGE tour: connect a wallet, deploy a 2-of-3 Safe, the proposal agent proposes, you review, the signer agent signs and sends">
+  </a>
+  <br><sub>▶ Narrated walkthrough on <a href="https://sage.criptografia.app/app/#how-video">sage.criptografia.app</a>, recorded from the live page.</sub>
+</p>
 
 > **S**afe + **AG**I + **E** — the wise agent that decides when to sign.
 > *"Your agents. Your keys. Your rules."*
@@ -11,6 +30,25 @@ You talk to it through [MCP](https://modelcontextprotocol.io).
 
 SAGE is the **brain**; the raw Safe SDK work is the **body**. It never controls funds
 alone — the Safe's threshold does.
+
+## Try it in five minutes
+
+[sage.criptografia.app/app](https://sage.criptografia.app/app/) runs the whole workflow on
+Sepolia with your own wallet. No backend, no keys held by us, and this repo's
+`policyEngine.js` running unchanged in your browser.
+
+1. **Connect** a browser wallet on Sepolia and **deploy your own 2-of-3 Safe**: you, a
+   proposal agent and a signer agent.
+2. **Ask for payments** with the form, or in plain language with your own AI key (Claude,
+   OpenAI, Gemini, Grok, OpenRouter). The **proposal agent** proposes and adds signature 1;
+   the policy engine labels each one `AUTO_SIGN`, `HOLD_HUMAN` or `REJECT`.
+3. **Review the queue**, then either sign a payment yourself, or say
+   *"sign them all, I've reviewed"*: the **signer agent** adds signature 2 and sends each one
+   in order. Your OK is recorded as the override of its hold. A `REJECT` is never signed.
+
+<p align="center">
+  <img src="docs/img/try-queue.png" width="820" alt="The review queue: payments signed by the proposal agent, waiting for you, with Approve all">
+</p>
 
 ---
 
@@ -234,6 +272,9 @@ Once SAGE is configured in Claude Desktop:
 | *"show wallet state"* | `sage_info` | Owners, threshold, nonce, pending count |
 | *"last 10 transactions"* | `sage_history` | Executed transaction history |
 | *"show signing policy"* | `sage_policy` | Current auto-sign rules |
+| *"would you auto-sign 12k to a new address?"* | `sage_simulate` | Dry-run: resolve recipient → decode → policy. Signs nothing |
+| *"reject nonce 7"* | `sage_reject` | Proposes, co-signs and settles a no-op at that nonce, so the queued tx can never run |
+| *"settle what's ready"* | `sage_settle` | Keyless: broadcasts already-signed txs in nonce order via the vault-verified executor |
 
 > `sage_approve` **ignores** any `context` you pass it (kyc/aml/value). Gating is
 > derived from the real pending transaction — a caller cannot claim `value_usd: 10`
@@ -382,7 +423,6 @@ Importing `sage.js` as a module (for `deriveTrustedContext` / `resolveSafeAddres
 > The old `polygon-rpc.com` and `rpc.sepolia.org` defaults are dead (401 / Cloudflare
 > errors) and were replaced with keyless, live public nodes. Env vars still override.
 
-Primary wallet: Polygon Safe `0xe601D7B4103FD508dA521A25D7639F085448196d`.
 
 ---
 
@@ -420,10 +460,10 @@ bugs that were found and fixed:
 
 ## Tests
 
-Offline, network-free, timezone-independent. No keys, no funds.
+Offline, network-free, timezone-independent. No keys, no funds. **78 tests across 17 suites, all green.**
 
 ```bash
-npm test        # runs every test/*.mjs via `node --test`
+npm test        # runs every test/*.mjs and *.test.js via `node --test`
 ```
 
 | Suite | Locks in |
@@ -438,6 +478,11 @@ npm test        # runs every test/*.mjs via `node --test`
 | `address-book.mjs` | Recipient resolution: address / index / name / unique-prefix / ambiguity errors; ENS forward + best-effort reverse (mock provider). |
 | `authz.mjs` | Hardware 2FA with real crypto: Trezor EIP-712 (ethers) + YubiKey WebAuthn P-256 (Node crypto); batch-binding, TTL, replay, device-type + presence checks. |
 | `remote-signer.mjs` | Keyless signing: valid owner sig from a `signDigest`-only backend; v-normalization; refuses a signature that doesn't recover to the owner; HTTP vault backend (mock fetch) incl. wrong-key + error paths. |
+| `keyless-exec.test.mjs` | Keyless settlement: the vault signs the raw tx it was asked to, as the expected executor, or the broadcast is refused. |
+| `nonce-race.test.mjs` | A batch gets sequential nonces; an ignored nonce option or a collision with the queue aborts instead of creating rivals. |
+| `sage-simulate.mjs` | `sage_simulate`: shared ERC-20 decoder; assumed facts change the hypothetical decision but never reach a signing path. |
+| `safe-client.mjs` · `agent-key.mjs` · `daemon-monitor.mjs` · `inference.mjs` | Tx-service client, encrypted keystore, the 24/7 monitor, and BYOK model selection. |
+| `policyEngine.test.js` · `policyEngine.adversarial.test.js` | Policy decision table plus adversarial inputs (prototype pollution, NaN, wrong types). |
 
 ---
 
@@ -563,7 +608,7 @@ decision, backed by the audit log and the test suite above.
 When a trade is confirmed at the OTC desk (`POST /api/confirm`), the intended flow is:
 propose a Safe transfer to the customer → agent-compliance runs KYC/AML → if within
 policy, agent-execution co-signs → 2-of-3 reached → Safe executes → receipt updated with
-the on-chain tx hash. See [CRIPTO-181](https://linear.app/criptografia/issue/CRIPTO-181).
+the on-chain tx hash. (CRIPTO-181.)
 
 ---
 
@@ -583,7 +628,11 @@ sage/
 ├── setup.js          One-shot wizard: keys → owners → 2-of-3 threshold
 ├── sage-config.json  Chain, Safe address, policy rules
 ├── .claude/skills/   /proposal and /signer agent skills
-├── test/             Offline suites (policy, fail-closed, batch, address book, hash)
+├── inference.js      BYOK / hosted model selection
+├── agentChat.js      Agent chat loop for the HTTP agents (`sage.js serve`)
+├── test/             Offline suites (policy, fail-closed, batch, address book, hash, keyless…)
+├── site/             sage.criptografia.app — landing page + the try-it app (`site/app/`)
+├── web/              Next.js + Privy frontend for the hosted agents
 ├── Dockerfile · docker-compose.yml · .env.example
 ```
 
@@ -591,15 +640,17 @@ sage/
 
 ## Tickets
 
+Internal tracker IDs, for reference.
+
 | Ticket | Topic |
 |--------|-------|
-| [TOKEN-67](https://linear.app/criptografia/issue/TOKEN-67) | Signing correctness + policy-bypass fixes (this branch) |
-| [CRIPTO-177](https://linear.app/criptografia/issue/CRIPTO-177) | Safe deployment (testnet → Polygon) |
-| [CRIPTO-178](https://linear.app/criptografia/issue/CRIPTO-178) | Safe SDK integration |
-| [CRIPTO-179](https://linear.app/criptografia/issue/CRIPTO-179) | Policy engine |
-| [CRIPTO-180](https://linear.app/criptografia/issue/CRIPTO-180) | MCP server tools |
-| [CRIPTO-181](https://linear.app/criptografia/issue/CRIPTO-181) | P2P desk integration |
-| [CRIPTO-182](https://linear.app/criptografia/issue/CRIPTO-182) | Daemon + monitoring |
+| TOKEN-67 | Signing correctness + policy-bypass fixes |
+| CRIPTO-177 | Safe deployment (testnet → Polygon) |
+| CRIPTO-178 | Safe SDK integration |
+| CRIPTO-179 | Policy engine |
+| CRIPTO-180 | MCP server tools |
+| CRIPTO-181 | P2P desk integration |
+| CRIPTO-182 | Daemon + monitoring |
 
 ---
 

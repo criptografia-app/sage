@@ -9,8 +9,8 @@ const PROVIDERS = {
                 models: ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'], ph: 'sk-ant-…', help: 'https://console.anthropic.com/settings/keys' },
   openai:     { name: 'OpenAI', api: 'openai', base: 'https://api.openai.com/v1', model: 'gpt-5-mini',
                 models: ['gpt-5-mini', 'gpt-5', 'gpt-4o-mini'], ph: 'sk-…', help: 'https://platform.openai.com/api-keys' },
-  gemini:     { name: 'Gemini', api: 'gemini', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-flash',
-                models: ['gemini-2.5-flash', 'gemini-2.5-pro'], ph: 'AIza…', help: 'https://aistudio.google.com/app/apikey' },
+  gemini:     { name: 'Gemini', api: 'gemini', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-3.8-flash',
+                models: ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-flash-latest', 'gemini-pro-latest'], ph: 'AIza…', help: 'https://aistudio.google.com/app/apikey' },
   grok:       { name: 'xAI Grok', api: 'openai', base: 'https://api.x.ai/v1', model: 'grok-3-mini',
                 models: ['grok-3-mini', 'grok-3'], ph: 'xai-…', help: 'https://console.x.ai/' },
   openrouter: { name: 'OpenRouter / custom', api: 'openai', base: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-haiku-4.5',
@@ -136,26 +136,49 @@ async function listModels(cfg) {
 
 // Model names change often. If the provider says the model doesn't exist, ask it which
 // models this key can use, pick a sensible chat model, and retry once.
-const PREFER = { claude: [/haiku/, /sonnet/], openai: [/^gpt-4o-mini$/, /^gpt-.*mini/, /^gpt-/], gemini: [/flash/, /pro/], grok: [/mini/, /grok/] };
-const SKIP = /image|tts|embed|live|audio|vision|aqa|learnlm|gemma|search|realtime|transcribe|moderation|dall|whisper|instruct|preview-tts|exp-/i;
+const PREFER = { claude: [/haiku/, /sonnet/], openai: [/^gpt-5-mini$/, /^gpt-.*mini/, /^gpt-/], gemini: [/^gemini-[\d.]+-flash$/, /^gemini-flash-latest$/, /flash/, /pro/], grok: [/mini/, /grok/] };
+const SKIP = /image|tts|embed|live|audio|vision|aqa|learnlm|gemma|search|realtime|transcribe|moderation|dall|whisper|instruct|exp-|lyria|omni|robotics|computer-use|antigravity|nano|customtools|lite|preview/i;
 function pickModel(id, models) {
   const usable = models.filter((m) => !SKIP.test(m)).sort().reverse();
   for (const re of PREFER[id] || []) { const m = usable.find((x) => re.test(x)); if (m) return m; }
   return usable[0];
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const busy = (e) => e.status === 503 || e.status === 429 || /high demand|overloaded|unavailable|rate.?limit|try again/i.test(e.message);
+const retired = (e) => e.status === 404 || /model.*(not found|not exist|invalid|unknown|not supported|no longer available)|deprecated|update your code/i.test(e.message);
+function switchModel(cfg, next, why) {
+  cfg.model = next;
+  $('ai-model').value = next;
+  store.set(`sage-ai:model:${active}`, next, true);
+  $('ai-status').textContent = `${why}; switched to ${next}.`;
+}
 async function call(cfg, messages) {
   const fn = { anthropic: callAnthropic, gemini: callGemini }[cfg.api] || callOpenAI;
-  try { return await fn(cfg, messages); }
-  catch (e) {
-    if (!(e.status === 404 || /model.*(not found|not exist|invalid|unknown|not supported)/i.test(e.message)) || cfg.retried || PROVIDERS[active].custom) throw e;
-    const next = pickModel(active, await listModels(cfg));
-    if (!next || next === cfg.model) throw e;
-    cfg.model = next; cfg.retried = true;
-    $('ai-model').value = next;
-    store.set(`sage-ai:model:${active}`, next, true);
-    $('ai-status').textContent = `Model not available; switched to ${next}.`;
-    return fn(cfg, messages);
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try { return await fn(cfg, messages); }
+    catch (e) {
+      lastErr = e;
+      if (PROVIDERS[active].custom) throw e;
+      if (busy(e)) {
+        // A busy model is usually busy for seconds. Retry, then try a sibling model.
+        if (attempt < 2) { $('ai-status').textContent = `${cfg.model} is busy, retrying…`; await sleep(1500 * (attempt + 1)); continue; }
+        const models = await listModels(cfg).catch(() => []);
+        const next = pickModel(active, models.filter((m) => m !== cfg.model));
+        if (next) { switchModel(cfg, next, `${lastErr.message.slice(0, 60)}`); continue; }
+        throw e;
+      }
+      if (retired(e) && !cfg.retried) {
+        cfg.retried = true;
+        // Google names the replacement in the error ("use models/gemini-…").
+        const named = (e.message.match(/use models\/([\w.-]+)/) || [])[1];
+        const next = named || pickModel(active, await listModels(cfg).catch(() => []));
+        if (next && next !== cfg.model) { switchModel(cfg, next, `${cfg.model} isn't available`); continue; }
+      }
+      throw e;
+    }
   }
+  throw lastErr;
 }
 
 // One conversation, kept in each API's own shape.
@@ -184,7 +207,7 @@ async function turn(cfg, userText, onTool) {
       const parts = [];
       for (const c of calls) {
         const out = await safeRun(c.functionCall.name, c.functionCall.args || {}, onTool);
-        parts.push({ functionResponse: { name: c.functionCall.name, response: { result: out } } });
+        parts.push({ functionResponse: { ...(c.functionCall.id ? { id: c.functionCall.id } : {}), name: c.functionCall.name, response: { result: out } } });
       }
       history.push({ role: 'user', parts });
     }
