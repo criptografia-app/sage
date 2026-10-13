@@ -93,6 +93,7 @@ async function connect() {
   const btn = $('btn-connect');
   const pick = announced.find((p) => p.info.rdns === 'io.metamask') || announced[0];
   S.eip1193 = pick?.provider || window.ethereum;
+  S.walletName = pick?.info?.name || (window.ethereum?.isBraveWallet ? 'Brave Wallet' : window.ethereum?.isMetaMask ? 'MetaMask' : 'your browser wallet');
   if (!S.eip1193) {
     log('No wallet found. Install <a href="https://metamask.io" target="_blank" rel="noopener">MetaMask</a> or another browser wallet, then reload.', 'bad');
     return;
@@ -128,8 +129,9 @@ async function connect() {
     step(S.safe ? 3 : 2);
     const bal = await reader.getBalance(S.me);
     $('me').innerHTML = `${addrLink(S.me)} · ${Number(ethers.formatEther(bal)).toFixed(4)} Sepolia ETH`;
-    log(`Connected ${addrLink(S.me)}. Two demo agents created in this tab.`);
+    log(`Connected ${esc(S.walletName)} account ${addrLink(S.me)}. Two demo agents created in this tab. Wrong account? Switch it in your wallet; this page follows.`);
     if (bal < ethers.parseEther('0.003')) {
+      log(`This account has ${Number(ethers.formatEther(bal)).toFixed(4)} Sepolia ETH. If your test ETH is in another account, switch to it in ${esc(S.walletName)}.`, 'warn');
       log('You need a little Sepolia ETH for gas (about 0.003). Free faucets: <a href="https://cloud.google.com/application/web3/faucet/ethereum/sepolia" target="_blank" rel="noopener">Google</a>, <a href="https://www.alchemy.com/faucets/ethereum-sepolia" target="_blank" rel="noopener">Alchemy</a>.', 'warn');
     }
     if (S.safe) { log(`Found your demo Safe from last time: ${addrLink(S.safe)}.`); await showSafe(); step(3); }
@@ -155,7 +157,7 @@ async function sendTx(req) {
   const [bal, est] = await Promise.all([reader.getBalance(S.me), reader.estimateGas(full).catch((e) => { throw new Error(`This would fail on Sepolia: ${e.shortMessage || e.message}`); })]);
   const fee = await reader.getFeeData();
   const need = est * 13n / 10n * (fee.maxFeePerGas || fee.gasPrice || 0n) + (req.value || 0n);
-  if (bal < need) throw new Error(`Your wallet has ${ethers.formatEther(bal)} Sepolia ETH and this needs about ${Number(ethers.formatEther(need)).toFixed(5)}. Get test ETH from a faucet.`);
+  if (bal < need) throw new Error(`The connected account ${short(S.me)} (${S.walletName}) has ${ethers.formatEther(bal)} Sepolia ETH; this needs about ${Number(ethers.formatEther(need)).toPrecision(2)}. If your test ETH is in another account, switch to it in your wallet. Otherwise get some from a faucet.`);
   return S.signer.sendTransaction({ to: req.to, data: full.data, value: full.value, gasLimit: est * 13n / 10n });
 }
 
