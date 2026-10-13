@@ -108,6 +108,7 @@
           <label class="ai-field">API key <a id="ai-help" target="_blank" rel="noopener">get one ↗</a>
             <input id="ai-key" type="password" autocomplete="off" spellcheck="false"></label>
           <label class="ai-field">Model <input id="ai-model" list="ai-models" spellcheck="false"><datalist id="ai-models"></datalist></label>
+          <label class="ai-field" id="ai-ws-row" hidden>Workspace ID (only if Anthropic asks for one) <input id="ai-ws" placeholder="wrkspc_…" spellcheck="false"></label>
           <label class="ai-field" id="ai-base-row" hidden>Base URL (any OpenAI-compatible endpoint) <input id="ai-base" spellcheck="false"></label>
           <label class="check"><input type="checkbox" id="ai-remember"> Remember the key on this device (otherwise it's forgotten when you close the tab)</label>
           <div class="ai-actions"><button type="button" class="btn btn-ghost" id="ai-test">Test key</button><button type="button" class="linkish" id="ai-forget">Forget key</button></div>
