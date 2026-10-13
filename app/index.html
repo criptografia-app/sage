@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Try SAGE</title>
+<meta name="description" content="Connect your wallet, deploy your own 2-of-3 Safe with two AI co-signers on Sepolia, and see what the agents may sign without you.">
+<meta property="og:title" content="Try SAGE: your wallet, two AI co-signers">
+<meta property="og:description" content="Deploy your own 2-of-3 Safe with two AI co-signers on Sepolia and test the policy engine yourself.">
+<meta property="og:image" content="https://sage.criptografia.app/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../img/favicon.ico" sizes="48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/favicon-32.png">
+<link rel="apple-touch-icon" href="../img/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="app.css">
+<script type="importmap">
+{ "imports": { "fs": "./shim/fs.js", "path": "./shim/path.js", "url": "./shim/url.js" } }
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="holo" aria-hidden="true"><div class="holo-img"></div><div class="holo-ghost"></div><div class="holo-scan"></div></div>
+<header class="head">
+  <div class="wrap">
+    <a class="brand" href="../" aria-label="SAGE, home">
+      <img src="../img/mark.png" alt="" width="30" height="30">
+      <span>SAGE</span>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="#try">Try it</a>
+      <a href="#simulate">Policy</a>
+      <a class="btn btn-green" href="https://github.com/criptografia-app/sage">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="live-hero">
+    <div class="wrap">
+      <p class="eyebrow">Try SAGE on Sepolia</p>
+      <h1>A real wallet with <span>two AI co-signers.</span></h1>
+      <p class="sub">Connect your wallet and get your own 2-of-3 Safe, co-owned by you and two AI agents. Propose a payment and watch the policy engine decide whether the agents may sign it alone or must wait for you. It runs on the Sepolia test network, with no backend of ours.</p>
+      <div class="cta"><a class="btn btn-green" href="#try">Try it with your wallet</a><a class="btn btn-ghost" href="#simulate">Just try the policy</a></div>
+    </div>
+  </section>
+
+  <section id="try" class="alt tight">
+    <div class="wrap">
+      <p class="eyebrow">Try it with your wallet</p>
+      <h2>Your own Safe, two AI co-signers, five minutes.</h2>
+      <p class="sub small">Connect a wallet on Sepolia. You get a 2-of-3 Safe owned by you and two demo agents. Propose a payment, watch the policy engine decide, and sign when it asks for you. Everything happens on the Sepolia test network, and your wallet pays the gas (about 0.003 test ETH).</p>
+      <ol class="try-steps">
+        <li class="try-step" data-step="1"><div><b>Connect your wallet</b><small id="me">MetaMask or any browser wallet, on Sepolia.</small></div><button class="btn btn-green" id="btn-connect">Connect wallet</button></li>
+        <li class="try-step" data-step="2"><div><b>Create your Safe</b><small>Owners: you, proposal agent <span id="agent-p">…</span>, signer agent <span id="agent-s">…</span>. Any 2 of 3.</small></div><button class="btn btn-green" id="btn-deploy">Deploy Safe</button></li>
+        <li class="try-step" data-step="3"><div><b>Fund it</b><small id="my-safe">Send it a little test ETH to play with.</small></div><span class="inline"><input id="fund-amt" value="0.001" inputmode="decimal" aria-label="Amount in ETH"> ETH <button class="btn btn-green" id="btn-fund">Fund</button></span></li>
+        <li class="try-step" data-step="4">
+          <form id="try-form" class="try-form" autocomplete="off">
+            <b>Ask the agents to pay someone</b>
+            <div class="row2">
+              <label>To <input id="to" placeholder="0x… (empty = back to you)"></label>
+              <label>Amount (ETH) <input id="amt" value="0.0002" inputmode="decimal"></label>
+            </div>
+            <fieldset class="mode">
+              <legend>What SAGE knows about this payment</legend>
+              <label><input type="radio" name="tmode" value="shipped" checked> As shipped: nothing verified, so it should hold</label>
+              <label><input type="radio" name="tmode" value="wired"> Pretend compliance and a price oracle are wired:</label>
+            </fieldset>
+            <div class="fields muted" id="try-facts">
+              <label>Value (USD)<input type="number" name="usd" value="900" min="0" step="100"></label>
+              <label class="check"><input type="checkbox" name="hours" checked> Business hours (Mon 11:00 BRT)</label>
+              <label class="check"><input type="checkbox" name="known" checked> Recipient seen before</label>
+              <label class="check"><input type="checkbox" name="kyc" checked> KYC verified</label>
+              <label class="check"><input type="checkbox" name="aml" checked> AML clear</label>
+              <label class="check"><input type="checkbox" name="flag"> AML flag</label>
+            </div>
+            <button class="btn btn-green" id="btn-propose">Propose payment</button>
+          </form>
+        </li>
+        <li class="try-step" data-step="5" id="try-decision" hidden>
+          <div class="decision"><span class="v-badge" id="try-badge"></span><ul id="try-reasons"></ul><div id="try-next"></div></div>
+        </li>
+      </ol>
+      <div class="try-log-wrap"><div class="panel-head"><h3>Activity</h3><button class="linkish" id="btn-reset">Start over</button></div><ol id="try-log" class="try-log"></ol></div>
+      <p class="note">For this demo the two agents run in this browser tab with throwaway keys. In SAGE they run in your MCP server, and their keys stay in a vault. Your wallet is never asked for anything but a Sepolia transaction or a Safe signature, and you see each one before it goes.</p>
+    </div>
+  </section>
+
+
+
+  <section id="simulate" class="tight">
+    <div class="wrap">
+      <p class="eyebrow">Policy engine, running in your browser</p>
+      <h2>Would the agent sign this without you?</h2>
+      <p class="sub small">This is <a href="https://github.com/criptografia-app/sage/blob/staging/policyEngine.js">policyEngine.js</a> from the repo, unchanged, with the example policy. No model is involved. Change the facts and see the decision.</p>
+
+      <div class="grid2 sim">
+        <form class="panel" id="sim-form" autocomplete="off">
+          <fieldset class="mode">
+            <legend>What SAGE knows</legend>
+            <label><input type="radio" name="mode" value="shipped" checked> As shipped: compliance and price oracle not wired</label>
+            <label><input type="radio" name="mode" value="wired"> Wired: you supply the facts below</label>
+          </fieldset>
+          <div class="fields" id="fields">
+            <label>Value (USD)<input type="number" name="usd" value="1500" min="0" step="100"></label>
+            <label>Token<select name="token"><option>ETH</option><option>USDC</option><option>USDT</option><option>BNB</option><option>DOGE</option><option>PEPE</option></select></label>
+            <label>Day (BRT)<select name="day"><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option><option value="0">Sunday</option></select></label>
+            <label>Time (BRT)<input type="number" name="hour" value="11" min="0" max="23"></label>
+            <label class="check"><input type="checkbox" name="known" checked> Recipient seen before</label>
+            <label class="check"><input type="checkbox" name="kyc" checked> KYC verified</label>
+            <label class="check"><input type="checkbox" name="aml" checked> AML clear</label>
+            <label class="check"><input type="checkbox" name="flag"> AML flag on address</label>
+          </div>
+        </form>
+        <div class="panel verdict" id="verdict" aria-live="polite">
+          <span class="v-badge" id="v-badge">…</span>
+          <ul id="v-reasons"></ul>
+          <p class="note" id="v-what"></p>
+        </div>
+      </div>
+      <pre class="code policy" id="policy-json"></pre>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>This page has no backend and holds none of your keys. Your wallet signs and pays for every Sepolia transaction, and you see each one before it goes. The two demo agents run in your browser tab. Sepolia is a test network and its ETH has no value.</p>
+    <p><a href="../">SAGE home</a> · <a href="https://github.com/criptografia-app/sage">Source (MIT)</a> · <a href="https://private.criptografia.app">CRIPTOGRAFIA PRIVATE</a></p>
+  </div>
+</footer>
+<script type="module" src="app.js"></script>
+<script type="module" src="try.js"></script>
+</body>
+</html>
