@@ -199,3 +199,21 @@ section.alt { background: rgba(16, 26, 44, .55); }
 .real code { font: 13px var(--mono); color: var(--green); }
 .real .code { font-size: 13px; }
 @media (max-width: 900px) { .chat { min-height: 440px; } .msg { max-width: 100%; } }
+
+/* review queue */
+.queue { width: 100%; display: grid; gap: 12px; }
+.queue em { color: var(--white); font-style: normal; }
+.qlist { display: grid; gap: 8px; }
+.qrow { display: grid; grid-template-columns: 44px 1fr auto; gap: 12px; align-items: center; border: 1px solid var(--line);
+        border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+.qrow.executed { opacity: .7; } .qrow.rejected { opacity: .6; }
+.qn { color: var(--muted); font-size: 13px; }
+.qmain b { display: block; color: var(--white); font-size: 15px; } .qmain b a { color: var(--white); }
+.qmain small { display: block; color: var(--muted); font-size: 13px; }
+.qside { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.st { font: 600 12px var(--mono); color: var(--amber); } .st.ok { color: var(--green); text-decoration: none; } .st.bad { color: var(--red); }
+.v-chip { font: 600 11px var(--mono); padding: 2px 6px; border-radius: 4px; margin-right: 4px; }
+.btn.sm { padding: 7px 12px; font-size: 13px; }
+.muted-note { color: var(--muted); font-size: 12px; }
+#btn-approve-all { justify-self: start; }
+@media (max-width: 700px) { .qrow { grid-template-columns: 34px 1fr; } .qside { grid-column: 2; align-items: flex-start; flex-direction: row; flex-wrap: wrap; } }

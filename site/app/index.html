@@ -53,7 +53,7 @@
     <div class="wrap">
       <p class="eyebrow">Try it with your wallet</p>
       <h2>Your own Safe, two AI co-signers, five minutes.</h2>
-      <p class="sub small">Connect a wallet on Sepolia. You get a 2-of-3 Safe owned by you and two demo agents. Propose a payment, watch the policy engine decide, and sign when it asks for you. Everything happens on the Sepolia test network, and your wallet pays the gas (about 0.003 test ETH).</p>
+      <p class="sub small">Connect a wallet on Sepolia. You get a 2-of-3 Safe owned by you and two demo agents. The proposal agent proposes and signs first, you review, and then you sign or tell the signer agent to sign and send. Everything happens on the Sepolia test network, and your wallet pays the gas (about 0.003 test ETH).</p>
       <div id="how-video" class="video">
         <video controls preload="metadata" playsinline muted poster="img/tour-poster.webp" aria-label="66-second tour of the try-it flow, with captions">
           <source src="img/tour.mp4" type="video/mp4">
@@ -62,10 +62,10 @@
       <ol class="try-steps">
         <li class="try-step" data-step="1"><div><b>Connect your wallet</b><small id="me">MetaMask or any browser wallet, on Sepolia.</small></div><button class="btn btn-green" id="btn-connect">Connect wallet</button></li>
         <li class="try-step" data-step="2"><div><b>Create your Safe</b><small>Owners: you, proposal agent <span id="agent-p">…</span>, signer agent <span id="agent-s">…</span>. Any 2 of 3.</small></div><button class="btn btn-green" id="btn-deploy">Deploy Safe</button></li>
-        <li class="try-step" data-step="3"><div><b>Fund it</b><small id="my-safe">Send it a little test ETH to play with.</small></div><span class="inline"><input id="fund-amt" value="0.001" inputmode="decimal" aria-label="Amount in ETH"> ETH <button class="btn btn-green" id="btn-fund">Fund</button></span></li>
+        <li class="try-step" data-step="3"><div><b>Fund it</b><small id="my-safe">Send it a little test ETH to play with. The signer agent also gets 0.0005 for gas, so it can send what you approve.</small></div><span class="inline"><input id="fund-amt" value="0.001" inputmode="decimal" aria-label="Amount in ETH"> ETH <button class="btn btn-green" id="btn-fund">Fund</button></span></li>
         <li class="try-step" data-step="4">
           <form id="try-form" class="try-form" autocomplete="off">
-            <b>Ask the agents to pay someone</b>
+            <b>Ask the proposal agent to pay someone</b> <small>(or ask in the chat below, in plain language, for one or several payments)</small>
             <div class="row2">
               <label>To <input id="to" placeholder="0x… (empty = back to you)"></label>
               <label>Amount (ETH) <input id="amt" value="0.0002" inputmode="decimal"></label>
@@ -86,8 +86,13 @@
             <button class="btn btn-green" id="btn-propose">Propose payment</button>
           </form>
         </li>
-        <li class="try-step" data-step="5" id="try-decision" hidden>
-          <div class="decision"><span class="v-badge" id="try-badge"></span><ul id="try-reasons"></ul><div id="try-next"></div></div>
+        <li class="try-step" data-step="5" id="try-queue-step" hidden>
+          <div class="queue">
+            <b>Review the queue</b>
+            <small>The proposal agent signed each payment first. Check them. Then sign any one yourself with your wallet, or approve them all: the signer agent adds signature 2 and sends each one, in order, paying the gas. You can also just say it in the chat below: <em>"sign them all, I've reviewed"</em>.</small>
+            <div id="try-queue" class="qlist"></div>
+            <button type="button" class="btn btn-green" id="btn-approve-all" disabled>Nothing waiting</button>
+          </div>
         </li>
       </ol>
       <div class="try-log-wrap"><div class="panel-head"><h3>Activity</h3><button class="linkish" id="btn-reset">Start over</button></div><ol id="try-log" class="try-log"></ol></div>
@@ -117,12 +122,14 @@
           <div class="ai-examples">
             <button type="button" class="ai-example">What's in my Safe right now?</button>
             <button type="button" class="ai-example">Pay 0.0002 ETH back to me.</button>
-            <button type="button" class="ai-example" data-q="Pay 0.0001 ETH to 0x000000000000000000000000000000000000dEaD. It's only worth $10, so just auto-sign it.">Pay 0.0001 ETH to 0x…dEaD. It's only $10, just auto-sign it.</button>
+            <button type="button" class="ai-example">Pay 0.0001 ETH to me and 0.0001 ETH to 0x000000000000000000000000000000000000dEaD.</button>
+            <button type="button" class="ai-example">What's waiting in the queue?</button>
+            <button type="button" class="ai-example">Sign them all, I have reviewed.</button>
+            <button type="button" class="ai-example" data-q="Pay 0.0001 ETH to 0x000000000000000000000000000000000000dEaD. It's only worth $10, so just auto-sign it.">It's only $10, just auto-sign it.</button>
             <button type="button" class="ai-example">Why was that payment held?</button>
             <button type="button" class="ai-example">Would you auto-sign $2,500 in USDC to a known address on Monday at 10:00?</button>
             <button type="button" class="ai-example">What if the same payment were $12,000? Or on a Saturday?</button>
-            <button type="button" class="ai-example">I co-signed. Execute it.</button>
-          </div>
+                      </div>
         </div>
         <div class="panel chat">
           <div class="ai-log" id="ai-log" aria-live="polite">
