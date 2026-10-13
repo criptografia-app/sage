@@ -43,13 +43,13 @@ async function confirmed(hash) {
   return rc;
 }
 
-const S = { eip1193: null, signer: null, me: null, agents: null, safe: null, pending: null };
+const S = { eip1193: null, signer: null, me: null, agents: null, safe: null, queue: [] };
 
 // ── storage (best effort; the demo still works for the session without it) ──
 const key = () => `sage-demo:${S.me?.toLowerCase()}`;
 function load() { try { return JSON.parse(localStorage.getItem(key()) || 'null'); } catch { return null; } }
 function save() {
-  try { localStorage.setItem(key(), JSON.stringify({ proposal: S.agents.proposal.privateKey, signer: S.agents.signer.privateKey, safe: S.safe })); } catch {}
+  try { localStorage.setItem(key(), JSON.stringify({ proposal: S.agents.proposal.privateKey, signer: S.agents.signer.privateKey, safe: S.safe, queue: S.queue })); } catch {}
 }
 
 function log(html, cls = '') {
@@ -121,6 +121,7 @@ async function connect() {
       signer: new ethers.Wallet(saved?.signer || ethers.Wallet.createRandom().privateKey),
     };
     S.safe = saved?.safe || null;
+    S.queue = Array.isArray(saved?.queue) ? saved.queue : [];
     save();
     $('agent-p').innerHTML = addrLink(S.agents.proposal.address);
     $('agent-s').innerHTML = addrLink(S.agents.signer.address);
@@ -134,7 +135,7 @@ async function connect() {
       log(`This account has ${Number(ethers.formatEther(bal)).toFixed(4)} Sepolia ETH. If your test ETH is in another account, switch to it in ${esc(S.walletName)}.`, 'warn');
       log('You need a little Sepolia ETH for gas (about 0.003). Free faucets: <a href="https://cloud.google.com/application/web3/faucet/ethereum/sepolia" target="_blank" rel="noopener">Google</a>, <a href="https://www.alchemy.com/faucets/ethereum-sepolia" target="_blank" rel="noopener">Alchemy</a>.', 'warn');
     }
-    if (S.safe) { log(`Found your demo Safe from last time: ${addrLink(S.safe)}.`); await showSafe(); step(3); }
+    if (S.safe) { log(`Found your demo Safe from last time: ${addrLink(S.safe)}.`); await showSafe(); await syncQueue(); renderQueue(); step(pendingItems().length ? 5 : 3); }
     else step(2);
   } catch (e) { fail(e, btn); }
 }
@@ -143,7 +144,7 @@ async function connect() {
 // and their own gas estimate then fails with misleading errors ("insufficient funds",
 // "missing revert data"). So: re-check the network, estimate on the public Sepolia
 // node, and hand the wallet a ready gas limit.
-async function sendTx(req) {
+async function ensureChain() {
   let id = await S.eip1193.request({ method: 'eth_chainId' });
   if (id !== '0xaa36a7') {
     log('Your wallet is on another network. Switching it back to Sepolia…', 'warn');
@@ -153,6 +154,9 @@ async function sendTx(req) {
   }
   S.signer = await new ethers.BrowserProvider(S.eip1193).getSigner();
   if ((await S.signer.getAddress()).toLowerCase() !== S.me.toLowerCase()) throw new Error('Your wallet switched accounts. Reload the page.');
+}
+async function sendTx(req) {
+  await ensureChain();
   const full = { from: S.me, to: req.to, data: req.data || '0x', value: req.value || 0n };
   const [bal, est] = await Promise.all([reader.getBalance(S.me), reader.estimateGas(full).catch((e) => { throw new Error(`This would fail on Sepolia: ${e.shortMessage || e.message}`); })]);
   const fee = await reader.getFeeData();
@@ -194,6 +198,9 @@ async function showSafe() {
 }
 
 // ── 3. fund ─────────────────────────────────────────────────────────────────
+// The Safe gets the money to play with; the signer agent gets a little gas, because in
+// SAGE it is the signer agent that broadcasts once you approve.
+const AGENT_GAS = ethers.parseEther('0.0005');
 async function fund() {
   const btn = $('btn-fund');
   if (!S.safe) { log(S.agents ? 'Deploy your Safe first (step 2).' : 'Connect your wallet first (step 1).', 'warn'); return; }
@@ -203,14 +210,21 @@ async function fund() {
     btn.textContent = 'Sending…';
     log(`Funding your Safe: ${txLink(tx.hash)}`);
     await confirmed(tx.hash);
-    busy(btn, false);
     log('Your Safe is funded.', 'good');
+    if ((await reader.getBalance(S.agents.signer.address)) < AGENT_GAS / 2n) {
+      btn.textContent = 'Gas for the signer agent…';
+      const g = await sendTx({ to: S.agents.signer.address, value: AGENT_GAS });
+      log(`Sending the signer agent ${ethers.formatEther(AGENT_GAS)} ETH for gas, so it can broadcast what you approve: ${txLink(g.hash)}`);
+      await confirmed(g.hash);
+      log('The signer agent has gas.', 'good');
+    }
+    busy(btn, false);
     await showSafe();
     step(4);
   } catch (e) { fail(e, btn); }
 }
 
-// ── 4. propose + decide ─────────────────────────────────────────────────────
+// ── 4. propose: the proposal agent adds signature 1 ─────────────────────────
 function facts() {
   const f = new FormData($('try-form'));
   const wired = f.get('tmode') === 'wired';
@@ -221,93 +235,205 @@ function facts() {
     : { kyc_verified: false, aml_clear: false, now };   // what sage.js derives today
 }
 
+const domain = () => ({ chainId: CHAIN_ID, verifyingContract: S.safe });
+const pendingItems = () => S.queue.filter((q) => q.status === 'pending').sort((a, b) => a.nonce - b.nonce);
+const sigCount = (q) => Object.keys(q.sigs).length;
+const fmtItem = (q) => ({ id: q.id, nonce: q.nonce, to: q.to, amount_eth: q.amount, policy: q.decision, reasons: q.reasons,
+  signatures: `${sigCount(q)}/2`, signed_by: Object.keys(q.sigs).map(label), status: q.status, ...(q.tx ? { tx: `${EXPLORER}/tx/${q.tx}` } : {}) });
+function label(a) {
+  a = a.toLowerCase();
+  if (a === S.me?.toLowerCase()) return 'you';
+  if (a === S.agents?.proposal.address.toLowerCase()) return 'proposal agent';
+  if (a === S.agents?.signer.address.toLowerCase()) return 'signer agent';
+  return short(a);
+}
+
+async function safeNonce() { return Number(await new ethers.Contract(S.safe, SAFE_ABI, reader).nonce()); }
+
+// Drop what the chain already executed (by us, or anyone) so the queue matches reality.
+async function syncQueue() {
+  const n = await safeNonce();
+  for (const q of S.queue) if (q.status === 'pending' && q.nonce < n) { q.status = 'executed'; }
+  save();
+  return n;
+}
+
+async function proposeMany(list) {
+  if (!S.safe) throw new Error('Connect your wallet and deploy your Safe first (steps 1 to 3).');
+  const onchain = await syncQueue();
+  let nonce = Math.max(onchain, ...pendingItems().map((q) => q.nonce + 1));
+  const bal = await reader.getBalance(S.safe);
+  const ctx = facts();
+  const out = [];
+  let total = pendingItems().reduce((t, q) => t + ethers.parseEther(q.amount), 0n);
+  for (const it of list) {
+    const to = ethers.getAddress(String(it.to || S.me).trim());
+    const value = ethers.parseEther(String(it.amountEth || '0.0002'));
+    const { decision, reasons } = evaluate({ to, value: value.toString() }, ctx, 'execution');
+    if (decision === 'REJECT') {
+      // Rejected before anything is signed, and no nonce is taken: a rejected payment
+      // must not sit in the queue blocking the ones behind it.
+      const q = { id: `r${Date.now().toString(36)}${out.length}`, to, amount: ethers.formatEther(value), decision, reasons, sigs: {}, status: 'rejected' };
+      S.queue.push(q); out.push(fmtItem(q));
+      log(`Policy says REJECT for ${ethers.formatEther(value)} ETH to ${addrLink(to)}: ${esc(reasons[0])}. Nothing was signed.`, 'bad');
+      continue;
+    }
+    total += value;
+    if (total > bal) throw new Error(`Your Safe holds ${ethers.formatEther(bal)} ETH, not enough for ${ethers.formatEther(total)} queued. Fund it first.`);
+    const message = { to, value: value.toString(), data: '0x', operation: 0, safeTxGas: 0, baseGas: 0, gasPrice: 0, gasToken: ZERO, refundReceiver: ZERO, nonce };
+    const hash = ethers.TypedDataEncoder.hash(domain(), SAFE_TX_TYPES, message);
+    const sigs = { [S.agents.proposal.address]: S.agents.proposal.signingKey.sign(hash).serialized };
+    const q = { id: hash.slice(2, 8), hash, nonce, to, amount: ethers.formatEther(value), message, sigs, decision, reasons, status: 'pending' };
+    if (decision === 'AUTO_SIGN') {
+      sigs[S.agents.signer.address] = S.agents.signer.signingKey.sign(hash).serialized;
+      log(`#${nonce}: ${q.amount} ETH to ${addrLink(to)}. AUTO_SIGN: inside every limit, so both agents signed (2 of 2).`, 'good');
+    } else {
+      log(`#${nonce}: ${q.amount} ETH to ${addrLink(to)}. Proposal agent signed (1 of 2). HOLD_HUMAN: ${esc(reasons[0])}. Waiting for your review.`, 'warn');
+    }
+    S.queue.push(q); out.push(fmtItem(q));
+    nonce++;
+  }
+  save();
+  renderQueue();
+  step(5);
+  $('try-queue-step').scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+  return { proposed: out, next: 'Review the queue on the page. Then sign any of them with your wallet, or say "sign them all, I have reviewed" and the signer agent will sign and send them.' };
+}
+
 async function propose(opts = {}) {
   const btn = $('btn-propose');
   try {
-    if (!S.safe) throw new Error('Connect your wallet and deploy your Safe first (steps 1 to 3).');
     if (opts.to !== undefined) $('to').value = opts.to;
     if (opts.amountEth !== undefined) $('amt').value = String(opts.amountEth);
-    const to = ethers.getAddress(($('to').value || S.me).trim());
-    const value = ethers.parseEther($('amt').value || '0.0002');
-    const { bal, nonce } = await showSafe();
-    if (bal < value) throw new Error(`Your Safe holds ${ethers.formatEther(bal)} ETH, less than ${ethers.formatEther(value)}. Fund it first.`);
-    const message = { to, value, data: '0x', operation: 0, safeTxGas: 0, baseGas: 0, gasPrice: 0, gasToken: ZERO, refundReceiver: ZERO, nonce };
-    const domain = { chainId: CHAIN_ID, verifyingContract: S.safe };
-    const hash = ethers.TypedDataEncoder.hash(domain, SAFE_TX_TYPES, message);
-    const sigs = { [S.agents.proposal.address]: S.agents.proposal.signingKey.sign(hash).serialized };
-    log(`Proposal agent proposed ${ethers.formatEther(value)} ETH to ${addrLink(to)} and added signature 1 of 2.`);
-
-    const ctx = facts();
-    const { decision, reasons } = evaluate({ to, value: value.toString() }, ctx, 'execution');
-    S.pending = { message, domain, hash, sigs, decision };
-    const badge = $('try-badge');
-    badge.textContent = decision;
-    badge.className = 'v-badge ' + { AUTO_SIGN: 'v-auto', HOLD_HUMAN: 'v-hold', REJECT: 'v-rej' }[decision];
-    $('try-reasons').innerHTML = reasons.map((r) => `<li>${esc(r)}</li>`).join('');
-    $('try-decision').hidden = false;
-
-    if (decision === 'AUTO_SIGN') {
-      sigs[S.agents.signer.address] = S.agents.signer.signingKey.sign(hash).serialized;
-      log('Policy says AUTO_SIGN. The signer agent co-signed on its own: 2 of 2. Ready to execute.', 'good');
-      $('try-next').innerHTML = '<p>The agents agree and the policy allows it. Anyone can now submit it; your wallet pays the gas.</p><button class="btn btn-green" id="btn-exec">Execute on chain</button>';
-    } else if (decision === 'HOLD_HUMAN') {
-      log(`Policy says HOLD_HUMAN: ${esc(reasons[0])}. The signer agent refuses. It needs you.`, 'warn');
-      $('try-next').innerHTML = '<p>The signer agent won\'t sign this. You are the other owner: review it, then add your signature from your wallet.</p><button class="btn btn-green" id="btn-cosign">Co-sign with my wallet</button>';
-    } else {
-      log(`Policy says REJECT: ${esc(reasons[0])}. Nothing will be signed.`, 'bad');
-      $('try-next').innerHTML = '<p>Rejected outright. Even an operator\'s "approve all" can\'t override an AML flag. Nothing was signed beyond the proposal, and no funds moved.</p>';
-    }
-    $('btn-exec')?.addEventListener('click', () => execute().catch(() => {}));
-    $('btn-cosign')?.addEventListener('click', cosign);
-    step(5);
-    $('try-decision').scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
-    return { decision, reasons, safe: S.safe, nonce: Number(nonce), to, amount_eth: ethers.formatEther(value),
-      signatures: Object.keys(sigs).length, needed: 2,
-      next: { AUTO_SIGN: 'Both agents signed. The user can execute it (their wallet pays gas).',
-              HOLD_HUMAN: 'The signer agent refused. The user must review and click "Co-sign with my wallet" on the page; the assistant cannot sign.',
-              REJECT: 'Rejected. Nothing more will be signed.' }[decision] };
+    return await proposeMany([{ to: $('to').value || S.me, amountEth: $('amt').value || '0.0002' }]);
   } catch (e) { fail(e, btn); throw e; }
 }
 
-async function cosign() {
-  const btn = $('btn-cosign');
-  busy(btn, true);
+// ── 5. review: you sign, or you tell the signer agent to ────────────────────
+async function signMine(id) {
+  const q = S.queue.find((x) => x.id === id && x.status === 'pending');
+  const btn = document.querySelector(`[data-sign="${id}"]`);
+  if (!q) return;
+  if (btn) busy(btn, true);
   try {
-    const { domain, message, sigs } = S.pending;
-    const sig = await S.signer.signTypedData(domain, SAFE_TX_TYPES, message);
-    if (ethers.verifyTypedData(domain, SAFE_TX_TYPES, message, sig) !== S.me) throw new Error('Wallet signature did not recover to your address.');
-    sigs[S.me] = sig;
-    log('You co-signed from your wallet: 2 of 2.', 'good');
-    btn.remove();
-    $('try-next').insertAdjacentHTML('beforeend', '<button class="btn btn-green" id="btn-exec">Execute on chain</button>');
-    $('btn-exec').addEventListener('click', () => execute().catch(() => {}));
+    await ensureChain();
+    const sig = await S.signer.signTypedData(domain(), SAFE_TX_TYPES, q.message);
+    if (ethers.verifyTypedData(domain(), SAFE_TX_TYPES, q.message, sig) !== S.me) throw new Error('Wallet signature did not recover to your address.');
+    q.sigs[S.me] = sig;
+    save();
+    log(`You signed #${q.nonce} from your wallet: 2 of 2. It's ready to send.`, 'good');
+    renderQueue();
   } catch (e) { fail(e, btn); }
 }
 
-async function execute() {
-  const btn = $('btn-exec');
+function execData(q) {
+  const m = q.message;
+  // The Safe wants signatures ordered by owner address, ascending.
+  const packed = '0x' + Object.keys(q.sigs).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1)).map((a) => q.sigs[a].slice(2)).join('');
+  return new ethers.Interface(SAFE_ABI).encodeFunctionData('execTransaction', [m.to, m.value, m.data, m.operation, m.safeTxGas, m.baseGas, m.gasPrice, m.gasToken, m.refundReceiver, packed]);
+}
+
+// Broadcast one fully signed item. The signer agent pays gas when it can; otherwise your wallet does.
+async function broadcast(q, by = 'agent') {
+  const data = execData(q);
+  let tx;
+  const agent = S.agents.signer.connect(reader);
+  if (by === 'agent') {
+    const est = await reader.estimateGas({ from: agent.address, to: S.safe, data }).catch((e) => { throw new Error(`#${q.nonce} would fail on Sepolia: ${e.shortMessage || e.message}`); });
+    const fee = await reader.getFeeData();
+    if ((await reader.getBalance(agent.address)) >= est * 13n / 10n * (fee.maxFeePerGas || fee.gasPrice || 0n)) {
+      tx = await agent.sendTransaction({ to: S.safe, data, gasLimit: est * 13n / 10n });
+      log(`Signer agent broadcast #${q.nonce}: ${txLink(tx.hash)}`);
+    } else {
+      log('The signer agent has no gas left, so your wallet sends it.', 'warn');
+    }
+  }
+  if (!tx) { tx = await sendTx({ to: S.safe, data }); log(`You broadcast #${q.nonce}: ${txLink(tx.hash)}`); }
+  const rc = await confirmed(tx.hash);
+  const ok = rc.logs.some((l) => l.address.toLowerCase() === S.safe.toLowerCase() && l.topics[0] === ethers.id('ExecutionSuccess(bytes32,uint256)') && l.topics[1] === q.hash);
+  if (!ok) throw new Error(`#${q.nonce}: the Safe did not report ExecutionSuccess.`);
+  q.status = 'executed'; q.tx = tx.hash; save();
+  log(`Executed #${q.nonce} on Sepolia: ${q.amount} ETH to ${addrLink(q.to)}. ${txLink(tx.hash)}`, 'good');
+  return fmtItem(q);
+}
+
+async function sendMine(id) {
+  const q = S.queue.find((x) => x.id === id && x.status === 'pending');
+  const btn = document.querySelector(`[data-send="${id}"]`);
+  if (!q) return;
   if (btn) busy(btn, true);
   try {
-    if (!S.pending) throw new Error('Nothing is waiting to execute. Propose a payment first.');
-    if (Object.keys(S.pending.sigs).length < 2) throw new Error('Only 1 of 2 signatures so far. The user must click "Co-sign with my wallet" first.');
-    const { message: m, sigs, hash } = S.pending;
-    // The Safe requires signatures ordered by owner address, ascending.
-    const packed = '0x' + Object.keys(sigs).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1)).map((a) => sigs[a].slice(2)).join('');
-    const data = new ethers.Interface(SAFE_ABI).encodeFunctionData('execTransaction', [m.to, m.value, m.data, m.operation, m.safeTxGas, m.baseGas, m.gasPrice, m.gasToken, m.refundReceiver, packed]);
-    const tx = await sendTx({ to: S.safe, data });
-    if (btn) btn.textContent = 'Executing…';
-    log(`Submitted: ${txLink(tx.hash)}`);
-    const rc = await confirmed(tx.hash);
-    const ok = rc.logs.some((l) => l.address.toLowerCase() === S.safe.toLowerCase() && l.topics[0] === ethers.id('ExecutionSuccess(bytes32,uint256)') && l.topics[1] === hash);
-    if (!ok) throw new Error('The Safe did not report ExecutionSuccess.');
-    log(`Executed on Sepolia. ${ethers.formatEther(m.value)} ETH moved to ${addrLink(m.to)}. ${txLink(tx.hash)}`, 'good');
-    if (btn) btn.textContent = 'Done ✓';
-    S.pending = null;
-    await showSafe();
-    step(6);
-    return { executed: true, tx: tx.hash, explorer: `${EXPLORER}/tx/${tx.hash}`, amount_eth: ethers.formatEther(m.value), to: m.to };
+    if (pendingItems()[0]?.id !== q.id) throw new Error(`#${q.nonce} has to wait: a Safe sends strictly in nonce order. Send #${pendingItems()[0].nonce} first.`);
+    await broadcast(q, 'wallet');
+    await showSafe(); renderQueue();
+  } catch (e) { fail(e, btn); }
+}
+
+// "Sign them all, I have reviewed": your instruction is the human OK. The signer agent adds
+// signature 2 to every pending payment (a HOLD it signs on your say-so is recorded as your
+// override), then broadcasts them in nonce order. A REJECT never reaches the queue.
+async function approveAll() {
+  const btn = $('btn-approve-all');
+  if (btn) busy(btn, true, 'Signing and sending…');
+  try {
+    await syncQueue();
+    const items = pendingItems();
+    if (!items.length) throw new Error('Nothing is waiting in the queue. Propose a payment first.');
+    const results = [];
+    for (const q of items) {
+      const r = { nonce: q.nonce, to: q.to, amount_eth: q.amount, policy: q.decision };
+      try {
+        if (sigCount(q) < 2) {
+          q.sigs[S.agents.signer.address] = S.agents.signer.signingKey.sign(q.hash).serialized;
+          q.overrodeHold = q.decision === 'HOLD_HUMAN';
+          save();
+          log(`Signer agent signed #${q.nonce} (2 of 2)${q.overrodeHold ? `, authorized by you (${short(S.me)}) over its HOLD` : ''}.`, 'good');
+        }
+        Object.assign(r, await broadcast(q, 'agent'), { authorized_by: S.me, overrode_hold: !!q.overrodeHold });
+      } catch (e) {
+        r.status = 'error'; r.error = e.shortMessage || e.message;
+        log(`#${q.nonce}: ${esc(r.error)}`, 'bad');
+        results.push(r);
+        break;   // strict nonce order: nothing behind a failed one can execute
+      }
+      results.push(r);
+      renderQueue();
+    }
+    await showSafe(); renderQueue();
+    if (btn) busy(btn, false);
+    return { operator: S.me, results };
   } catch (e) { fail(e, btn); throw e; }
 }
+
+function renderQueue() {
+  const items = S.queue.slice().sort((a, b) => (a.nonce ?? 1e9) - (b.nonce ?? 1e9)).slice(-12);
+  $('try-queue-step').hidden = !items.length;
+  const head = pendingItems()[0]?.id;
+  $('try-queue').innerHTML = items.map((q) => {
+    const badge = { AUTO_SIGN: 'v-auto', HOLD_HUMAN: 'v-hold', REJECT: 'v-rej' }[q.decision];
+    const mine = q.sigs[S.me];
+    let act = '';
+    if (q.status === 'pending') {
+      if (!mine && sigCount(q) < 2) act += `<button class="btn btn-ghost sm" data-sign="${q.id}">Sign with my wallet</button>`;
+      if (sigCount(q) >= 2) act += q.id === head ? `<button class="btn btn-ghost sm" data-send="${q.id}">Send from my wallet</button>` : `<span class="muted-note">waits for #${pendingItems()[0].nonce}</span>`;
+    }
+    const st = q.status === 'executed' ? `<a href="${EXPLORER}/tx/${q.tx || ''}" target="_blank" rel="noopener" class="st ok">executed ↗</a>`
+      : q.status === 'rejected' ? '<span class="st bad">rejected, nothing signed</span>' : `<span class="st">${sigCount(q)}/2 signed</span>`;
+    return `<div class="qrow ${q.status}">
+      <span class="mono qn">${q.nonce !== undefined ? '#' + q.nonce : '–'}</span>
+      <div class="qmain"><b>${esc(q.amount)} ETH → ${addrLink(q.to)}</b>
+        <small><span class="v-chip ${badge}">${q.decision}</span> ${esc(q.reasons[0] || '')}</small>
+        <small>signed by: ${Object.keys(q.sigs).map(label).join(', ') || 'nobody'}</small></div>
+      <div class="qside">${st}${act}</div></div>`;
+  }).join('');
+  const n = pendingItems().length;
+  $('btn-approve-all').disabled = !n;
+  $('btn-approve-all').textContent = n ? `Approve all ${n}: signer agent signs and sends` : 'Nothing waiting';
+}
+$('try-queue').addEventListener('click', (e) => {
+  const s = e.target.closest('[data-sign]'); if (s) return signMine(s.dataset.sign);
+  const d = e.target.closest('[data-send]'); if (d) return sendMine(d.dataset.send);
+});
 
 function reset() {
   if (!S.me) return;
@@ -319,25 +445,26 @@ $('btn-connect').addEventListener('click', connect);
 $('btn-deploy').addEventListener('click', deploy);
 $('btn-fund').addEventListener('click', fund);
 $('btn-propose').addEventListener('click', (e) => { e.preventDefault(); propose().catch(() => {}); });
+$('btn-approve-all').addEventListener('click', () => approveAll().catch(() => {}));
 $('btn-reset').addEventListener('click', reset);
 document.querySelectorAll('input[name=tmode]').forEach((r) => r.addEventListener('change', () =>
   $('try-facts').classList.toggle('muted', new FormData($('try-form')).get('tmode') !== 'wired')));
 step(1);
 
-// Interface for the chat assistant (chat.js). It can read state, propose and execute,
-// exactly like the buttons. It cannot co-sign: that stays a click plus a wallet prompt.
+// Interface for the chat assistant (chat.js): the same actions as the buttons. Your own
+// wallet signature stays a click; "approve all" is the signer agent acting on your word.
 async function state() {
   if (!S.me) return { connected: false, next: 'Click "Connect wallet" in step 1.' };
   const out = { connected: true, wallet: S.me, agents: { proposal: S.agents.proposal.address, signer: S.agents.signer.address }, safe: S.safe };
   if (S.safe) {
     const c = new ethers.Contract(S.safe, SAFE_ABI, reader);
-    const [bal, nonce, thr] = await Promise.all([reader.getBalance(S.safe), c.nonce(), c.getThreshold()]);
-    Object.assign(out, { threshold: `${thr}-of-3`, balance_eth: ethers.formatEther(bal), nonce: Number(nonce) });
+    const [bal, nonce, thr, gas] = await Promise.all([reader.getBalance(S.safe), c.nonce(), c.getThreshold(), reader.getBalance(S.agents.signer.address)]);
+    Object.assign(out, { threshold: `${thr}-of-3`, balance_eth: ethers.formatEther(bal), nonce: Number(nonce), signer_agent_gas_eth: ethers.formatEther(gas) });
+    await syncQueue();
+    out.queue = S.queue.slice(-12).map(fmtItem);
   } else out.next = 'Click "Deploy Safe" in step 2.';
   out.what_sage_knows = facts();
-  if (S.pending) out.pending = { to: S.pending.message.to, amount_eth: ethers.formatEther(S.pending.message.value),
-    decision: S.pending.decision, signatures: Object.keys(S.pending.sigs).length, needed: 2 };
   return out;
 }
-window.sageDemo = { state, propose, execute, facts };
-
+window.sageDemo = { state, propose, proposeMany: (list) => proposeMany(list.map((x) => ({ to: x.to, amountEth: x.amount_eth ?? x.amountEth }))),
+  approveAll, queue: async () => { if (S.safe) await syncQueue(); return S.queue.slice(-12).map(fmtItem); }, facts };
