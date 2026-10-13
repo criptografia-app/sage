@@ -83,35 +83,7 @@ input[type=radio], input[type=checkbox] { accent-color: var(--green); width: 16p
 }
 @media (max-width: 520px) { .wrap { padding: 0 16px; } .panel { padding: 18px; } }
 
-/* ── Holographic Turing (Blade Runner): cyan bust, magenta ghost, scanlines, flicker ── */
-.holo { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; background:
-  radial-gradient(60vw 50vh at 78% 30%, rgba(0, 229, 255, .07), transparent 70%),
-  radial-gradient(40vw 40vh at 10% 90%, rgba(255, 45, 160, .05), transparent 70%), var(--bg); }
-.holo-img, .holo-ghost { position: absolute; right: -4vw; top: 6vh; width: min(62vw, 820px); aspect-ratio: 900 / 826;
-  background: url(img/turing-holo.webp) center / contain no-repeat;
-  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent 98%); mask-image: linear-gradient(to bottom, #000 55%, transparent 98%); }
-.holo-img { opacity: .26; mix-blend-mode: screen; filter: drop-shadow(0 0 18px rgba(0, 229, 255, .45)); animation: holo-flicker 7s infinite steps(1); }
-.holo-ghost { opacity: .10; mix-blend-mode: screen; transform: translate(5px, -2px); filter: hue-rotate(150deg) saturate(2.4); animation: holo-shift 5s infinite ease-in-out; }
-.holo-scan { position: absolute; inset: 0; background:
-  repeating-linear-gradient(to bottom, rgba(0, 229, 255, .045) 0 1px, transparent 1px 3px);
-  animation: holo-roll 9s linear infinite; }
-.holo-scan::after { content: ""; position: absolute; left: 0; right: 0; height: 18vh; top: -20vh;
-  background: linear-gradient(to bottom, transparent, rgba(0, 229, 255, .06), transparent); animation: holo-sweep 6s linear infinite; }
-@keyframes holo-flicker { 0%, 100% { opacity: .26; } 41% { opacity: .18; } 42% { opacity: .30; } 43% { opacity: .24; } 77% { opacity: .29; } 78% { opacity: .2; } }
-@keyframes holo-shift { 0%, 100% { transform: translate(5px, -2px); } 50% { transform: translate(-4px, 2px); } }
-@keyframes holo-roll { to { background-position: 0 300px; } }
-@keyframes holo-sweep { to { top: 110vh; } }
-@media (prefers-reduced-motion: reduce) { .holo-img, .holo-ghost, .holo-scan, .holo-scan::after { animation: none; } }
-@media (max-width: 900px) { .holo-img, .holo-ghost { width: 110vw; right: -30vw; top: 4vh; } .holo-img { opacity: .16; } }
-
-/* glass panels so the hologram shows through */
-body { background: transparent; }
-html { background: var(--bg); }
-.live-hero { background: transparent; }
-section.alt { background: rgba(16, 26, 44, .55); }
-.panel, .tx, .try-step, .try-log-wrap { background: rgba(16, 26, 44, .78) !important; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
-.code { background: rgba(7, 12, 22, .85); }
-.foot { background: rgba(11, 18, 32, .8); }
+/* The holographic background and glass panels live in ../style.css, shared with the home page. */
 
 /* ── Try it ── */
 .video { margin-top: 28px; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: #000;
