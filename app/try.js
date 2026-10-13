@@ -178,9 +178,12 @@ function facts() {
     : { kyc_verified: false, aml_clear: false, now };   // what sage.js derives today
 }
 
-async function propose() {
+async function propose(opts = {}) {
   const btn = $('btn-propose');
   try {
+    if (!S.safe) throw new Error('Connect your wallet and deploy your Safe first (steps 1 to 3).');
+    if (opts.to !== undefined) $('to').value = opts.to;
+    if (opts.amountEth !== undefined) $('amt').value = String(opts.amountEth);
     const to = ethers.getAddress(($('to').value || S.me).trim());
     const value = ethers.parseEther($('amt').value || '0.0002');
     const { bal, nonce } = await showSafe();
@@ -211,10 +214,16 @@ async function propose() {
       log(`Policy says REJECT: ${esc(reasons[0])}. Nothing will be signed.`, 'bad');
       $('try-next').innerHTML = '<p>Rejected outright. Even an operator\'s "approve all" can\'t override an AML flag. Nothing was signed beyond the proposal, and no funds moved.</p>';
     }
-    $('btn-exec')?.addEventListener('click', execute);
+    $('btn-exec')?.addEventListener('click', () => execute().catch(() => {}));
     $('btn-cosign')?.addEventListener('click', cosign);
     step(5);
-  } catch (e) { fail(e, btn); }
+    $('try-decision').scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+    return { decision, reasons, safe: S.safe, nonce: Number(nonce), to, amount_eth: ethers.formatEther(value),
+      signatures: Object.keys(sigs).length, needed: 2,
+      next: { AUTO_SIGN: 'Both agents signed. The user can execute it (their wallet pays gas).',
+              HOLD_HUMAN: 'The signer agent refused. The user must review and click "Co-sign with my wallet" on the page; the assistant cannot sign.',
+              REJECT: 'Rejected. Nothing more will be signed.' }[decision] };
+  } catch (e) { fail(e, btn); throw e; }
 }
 
 async function cosign() {
@@ -228,30 +237,33 @@ async function cosign() {
     log('You co-signed from your wallet: 2 of 2.', 'good');
     btn.remove();
     $('try-next').insertAdjacentHTML('beforeend', '<button class="btn btn-green" id="btn-exec">Execute on chain</button>');
-    $('btn-exec').addEventListener('click', execute);
+    $('btn-exec').addEventListener('click', () => execute().catch(() => {}));
   } catch (e) { fail(e, btn); }
 }
 
 async function execute() {
   const btn = $('btn-exec');
-  busy(btn, true);
+  if (btn) busy(btn, true);
   try {
+    if (!S.pending) throw new Error('Nothing is waiting to execute. Propose a payment first.');
+    if (Object.keys(S.pending.sigs).length < 2) throw new Error('Only 1 of 2 signatures so far. The user must click "Co-sign with my wallet" first.');
     const { message: m, sigs, hash } = S.pending;
     // The Safe requires signatures ordered by owner address, ascending.
     const packed = '0x' + Object.keys(sigs).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1)).map((a) => sigs[a].slice(2)).join('');
     const safe = new ethers.Contract(S.safe, SAFE_ABI, S.signer);
     const tx = await safe.execTransaction(m.to, m.value, m.data, m.operation, m.safeTxGas, m.baseGas, m.gasPrice, m.gasToken, m.refundReceiver, packed);
-    btn.textContent = 'Executing…';
+    if (btn) btn.textContent = 'Executing…';
     log(`Submitted: ${txLink(tx.hash)}`);
     const rc = await tx.wait();
     const ok = rc.logs.some((l) => l.address.toLowerCase() === S.safe.toLowerCase() && l.topics[0] === ethers.id('ExecutionSuccess(bytes32,uint256)') && l.topics[1] === hash);
     if (!ok) throw new Error('The Safe did not report ExecutionSuccess.');
     log(`Executed on Sepolia. ${ethers.formatEther(m.value)} ETH moved to ${addrLink(m.to)}. ${txLink(tx.hash)}`, 'good');
-    btn.textContent = 'Done ✓';
+    if (btn) btn.textContent = 'Done ✓';
     S.pending = null;
     await showSafe();
     step(6);
-  } catch (e) { fail(e, btn); }
+    return { executed: true, tx: tx.hash, explorer: `${EXPLORER}/tx/${tx.hash}`, amount_eth: ethers.formatEther(m.value), to: m.to };
+  } catch (e) { fail(e, btn); throw e; }
 }
 
 function reset() {
@@ -263,8 +275,26 @@ function reset() {
 $('btn-connect').addEventListener('click', connect);
 $('btn-deploy').addEventListener('click', deploy);
 $('btn-fund').addEventListener('click', fund);
-$('btn-propose').addEventListener('click', (e) => { e.preventDefault(); propose(); });
+$('btn-propose').addEventListener('click', (e) => { e.preventDefault(); propose().catch(() => {}); });
 $('btn-reset').addEventListener('click', reset);
 document.querySelectorAll('input[name=tmode]').forEach((r) => r.addEventListener('change', () =>
   $('try-facts').classList.toggle('muted', new FormData($('try-form')).get('tmode') !== 'wired')));
 step(1);
+
+// Interface for the chat assistant (chat.js). It can read state, propose and execute,
+// exactly like the buttons. It cannot co-sign: that stays a click plus a wallet prompt.
+async function state() {
+  if (!S.me) return { connected: false, next: 'Click "Connect wallet" in step 1.' };
+  const out = { connected: true, wallet: S.me, agents: { proposal: S.agents.proposal.address, signer: S.agents.signer.address }, safe: S.safe };
+  if (S.safe) {
+    const c = new ethers.Contract(S.safe, SAFE_ABI, reader);
+    const [bal, nonce, thr] = await Promise.all([reader.getBalance(S.safe), c.nonce(), c.getThreshold()]);
+    Object.assign(out, { threshold: `${thr}-of-3`, balance_eth: ethers.formatEther(bal), nonce: Number(nonce) });
+  } else out.next = 'Click "Deploy Safe" in step 2.';
+  out.what_sage_knows = facts();
+  if (S.pending) out.pending = { to: S.pending.message.to, amount_eth: ethers.formatEther(S.pending.message.value),
+    decision: S.pending.decision, signatures: Object.keys(S.pending.sigs).length, needed: 2 };
+  return out;
+}
+window.sageDemo = { state, propose, execute, facts };
+
