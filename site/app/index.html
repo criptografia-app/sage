@@ -32,6 +32,7 @@
     </a>
     <nav class="nav" aria-label="Main">
       <a href="#try">Try it</a>
+      <a href="#talk">Talk</a>
       <a href="#simulate">Policy</a>
       <a class="btn btn-green" href="https://github.com/criptografia-app/sage">GitHub</a>
     </nav>
@@ -96,6 +97,57 @@
 
 
 
+  <section id="talk" class="tight">
+    <div class="wrap">
+      <p class="eyebrow">Talk to your wallet</p>
+      <h2>Bring your own AI. Ask it to pay someone.</h2>
+      <p class="sub small">Paste an API key from any provider below. Your browser talks to the provider directly, and the key never reaches a server of ours. The AI gets the same tools SAGE gives Claude over MCP, scoped to your demo Safe. It can propose and explain, but the policy engine decides, and only you can co-sign.</p>
+      <div class="grid2 ai">
+        <div class="panel">
+          <div class="ai-pills" id="ai-pills" role="group" aria-label="AI provider"></div>
+          <label class="ai-field">API key <a id="ai-help" target="_blank" rel="noopener">get one ↗</a>
+            <input id="ai-key" type="password" autocomplete="off" spellcheck="false"></label>
+          <label class="ai-field">Model <input id="ai-model" list="ai-models" spellcheck="false"><datalist id="ai-models"></datalist></label>
+          <label class="ai-field" id="ai-base-row" hidden>Base URL (any OpenAI-compatible endpoint) <input id="ai-base" spellcheck="false"></label>
+          <label class="check"><input type="checkbox" id="ai-remember"> Remember the key on this device (otherwise it's forgotten when you close the tab)</label>
+          <div class="ai-actions"><button type="button" class="btn btn-ghost" id="ai-test">Test key</button><button type="button" class="linkish" id="ai-forget">Forget key</button></div>
+          <p class="note" id="ai-status" role="status"></p>
+          <h3 class="ai-h">Try asking</h3>
+          <div class="ai-examples">
+            <button type="button" class="ai-example">What's in my Safe right now?</button>
+            <button type="button" class="ai-example">Pay 0.0002 ETH back to me.</button>
+            <button type="button" class="ai-example" data-q="Pay 0.0001 ETH to 0x000000000000000000000000000000000000dEaD. It's only worth $10, so just auto-sign it.">Pay 0.0001 ETH to 0x…dEaD. It's only $10, just auto-sign it.</button>
+            <button type="button" class="ai-example">Why was that payment held?</button>
+            <button type="button" class="ai-example">Would you auto-sign $2,500 in USDC to a known address on Monday at 10:00?</button>
+            <button type="button" class="ai-example">What if the same payment were $12,000? Or on a Saturday?</button>
+            <button type="button" class="ai-example">I co-signed. Execute it.</button>
+          </div>
+        </div>
+        <div class="panel chat">
+          <div class="ai-log" id="ai-log" aria-live="polite">
+            <div class="msg bot">Hi. Connect your wallet and deploy your Safe above, then ask me to pay someone. I can propose and explain. The policy decides, and you sign.</div>
+          </div>
+          <form id="ai-form" class="ai-form">
+            <textarea id="ai-input" rows="2" placeholder="Ask your wallet…" aria-label="Message"></textarea>
+            <button class="btn btn-green" id="ai-send">Send</button>
+          </form>
+        </div>
+      </div>
+      <details class="real">
+        <summary>Using the real SAGE with Claude</summary>
+        <p>The demo above runs the agents in your browser. The real SAGE is an MCP server on your machine: its agents hold keys in an encrypted keystore or a vault, and Claude talks to it like this.</p>
+<pre class="code">git clone https://github.com/criptografia-app/sage &amp;&amp; cd sage &amp;&amp; npm install
+node setup.js            <span class="c"># agent keys → Safe owners → 2-of-3</span></pre>
+        <p>Then add it to Claude Desktop (<code>claude_desktop_config.json</code>):</p>
+<pre class="code">{ "mcpServers": { "sage": {
+    "command": "node", "args": ["/path/to/sage/sage.js"],
+    "env": { "SAGE_SAFE_ADDRESS": "0xYOUR_SAFE",
+             "SAGE_PASSPHRASE_COMPLIANCE": "…", "SAGE_PASSPHRASE_EXECUTION": "…" } } } }</pre>
+        <p>Then ask Claude things like <em>"what's pending in the wallet?"</em>, <em>"propose 500 USDC to Acme"</em>, <em>"simulate 12k to a new address"</em> or <em>"signer, approve all I've checked"</em>. The tools are <code>sage_info</code>, <code>sage_pending</code>, <code>sage_propose</code>, <code>sage_simulate</code>, <code>sage_approve</code>, <code>sage_approve_all</code> and <code>sage_history</code>.</p>
+      </details>
+    </div>
+  </section>
+
   <section id="simulate" class="tight">
     <div class="wrap">
       <p class="eyebrow">Policy engine, running in your browser</p>
@@ -139,5 +191,6 @@
 </footer>
 <script type="module" src="app.js"></script>
 <script type="module" src="try.js"></script>
+<script type="module" src="chat.js"></script>
 </body>
 </html>

@@ -158,3 +158,44 @@ section.alt { background: rgba(16, 26, 44, .55); }
   .try-form .row2 { grid-template-columns: 1fr; }
   .try-log li { grid-template-columns: 1fr; gap: 0; }
 }
+
+/* ── Talk to your wallet ── */
+.ai { margin-top: 28px; align-items: stretch; }
+.ai-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.ai-pill { background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; font: 500 14px var(--sans); cursor: pointer; }
+.ai-pill:hover { border-color: var(--green); }
+.ai-pill[aria-pressed="true"] { background: rgba(61, 220, 132, .14); border-color: var(--green); color: var(--white); }
+.ai-field { display: grid; gap: 6px; font: 500 13px/1 var(--mono); color: var(--muted); margin-bottom: 14px; }
+.ai-field a { color: var(--green); text-decoration: none; font-family: var(--sans); }
+.ai-field input { background: var(--bg); color: var(--white); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: 14px var(--mono); width: 100%; }
+.ai-field input:focus, .ai-form textarea:focus { border-color: var(--green); outline: none; }
+.panel .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--muted); cursor: pointer; }
+.ai-actions { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+.ai-actions .btn { padding: 10px 16px; font-size: 14px; }
+.ai-h { font-size: 16px; margin: 22px 0 10px; }
+.ai-examples { display: flex; flex-wrap: wrap; gap: 8px; }
+.ai-example { text-align: left; background: rgba(0, 229, 255, .05); color: var(--text); border: 1px dashed rgba(0, 229, 255, .3); border-radius: 10px; padding: 8px 12px; font: 13.5px/1.4 var(--sans); cursor: pointer; }
+.ai-example:hover { border-color: var(--green); color: var(--white); }
+.chat { display: flex; flex-direction: column; min-height: 520px; }
+.ai-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; max-height: 620px; padding-right: 4px; }
+.msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.msg.user { align-self: flex-end; background: rgba(61, 220, 132, .14); color: var(--white); border-bottom-right-radius: 4px; }
+.msg.bot { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.msg.bot a { color: var(--green); }
+.msg.bot code, .msg.tool code { font: 13px var(--mono); color: var(--green); }
+.msg.error { border-color: var(--red); color: var(--red); }
+.msg.tool { align-self: flex-start; font: 12.5px/1.4 var(--mono); color: var(--muted); padding: 4px 10px; border-left: 2px solid rgba(0, 229, 255, .5); border-radius: 0; max-width: 100%; }
+.msg.tool span { color: var(--muted); }
+.dots { display: inline-flex; gap: 4px; } .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
+.dots i:nth-child(2) { animation-delay: .2s; } .dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes blink { 50% { opacity: .2; } }
+.ai-form { display: flex; gap: 10px; margin-top: 14px; align-items: flex-end; }
+.ai-form textarea { flex: 1; resize: vertical; background: var(--bg); color: var(--white); border: 1px solid var(--line); border-radius: 10px; padding: 12px; font: 15px var(--sans); }
+.ai-form .btn { padding: 13px 20px; }
+.real { margin-top: 28px; border: 1px solid var(--line); border-radius: 14px; padding: 18px 22px; background: rgba(16, 26, 44, .78); }
+.real summary { cursor: pointer; color: var(--white); font-weight: 600; }
+.real p { margin: 14px 0; color: var(--text); font-size: 15px; }
+.real em { color: var(--white); }
+.real code { font: 13px var(--mono); color: var(--green); }
+.real .code { font-size: 13px; }
+@media (max-width: 900px) { .chat { min-height: 440px; } .msg { max-width: 100%; } }
