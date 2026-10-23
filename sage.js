@@ -1068,10 +1068,12 @@ async function handleTool(name, args) {
       const pass = process.env[`SAGE_PASSPHRASE_${agent.toUpperCase()}`];
       if (!keyless && !pass) return { error: `Set env var SAGE_PASSPHRASE_${agent.toUpperCase()} to unlock this agent's key (or configure keys.${agent} for a remote vault backend).` };
 
-      // Hardware 2FA: enforced when the operator has a registered device or the
-      // policy demands it. Fail-closed — a registered operator can't skip 2FA by
-      // omitting the proof (missing proof fails verification and refuses the batch).
-      const require2fa = !!deviceFor(operator) || !!(cfg.policy && cfg.policy.require_2fa);
+      // Hardware 2FA: enforced when the operator has a registered device, the
+      // policy demands it, or a proof is offered. Fail-closed — a registered
+      // operator can't skip 2FA by omitting the proof (missing proof fails
+      // verification and refuses the batch). With no gate, approveAll still
+      // refuses to override a policy HOLD: that takes a verified device proof.
+      const require2fa = !!deviceFor(operator) || !!(cfg.policy && cfg.policy.require_2fa) || !!authorization;
       const gate = require2fa ? { authorize: authorizer, proof: authorization } : {};
 
       // Keyless (vault) if configured, else the local encrypted key.
@@ -1145,11 +1147,19 @@ async function runCLI(argv) {
   // Signing agent: `node sage.js approve-all` — authorised by SAGE_OPERATOR.
   // Powers the `/signer` skill. Operator identity comes from the env so the
   // authenticated owner is bound to the session, not passed on the command line.
+  // A policy HOLD is only overridden with the owner's hardware 2FA proof, passed as
+  // JSON in SAGE_AUTHORIZATION; without it, held transactions are reported, not signed.
   if (cmd === 'approve-all') {
+    let authorization = null;
+    if (process.env.SAGE_AUTHORIZATION) {
+      try { authorization = JSON.parse(process.env.SAGE_AUTHORIZATION); }
+      catch { console.error('approve-all: SAGE_AUTHORIZATION must be the 2FA proof as JSON'); process.exit(1); }
+    }
     const result = await handleTool('sage_approve_all', {
       agent:    process.env.SAGE_AGENT || 'execution',
       operator: process.env.SAGE_OPERATOR,
       execute:  process.env.SAGE_NO_EXECUTE ? false : true,
+      authorization,
     });
     console.log(JSON.stringify(result, null, 2));
     return;

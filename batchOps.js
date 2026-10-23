@@ -226,9 +226,11 @@ export async function proposeBatch(client, signer, txs, opts = {}) {
  *        operator  - REQUIRED authenticated owner identity (email); authorises the batch
  *        execute   - execute txs that reach threshold after signing (default true)
  *        only      - optional allow-list of safeTxHashes to act on (default: all pending)
- *        authorize - optional hardware-2FA gate `(operator, safeTxHashes, proof) => Promise<void>`
+ *        authorize - hardware-2FA gate `(operator, safeTxHashes, proof) => Promise<void>`
  *                    that THROWS to reject. When present, a valid proof is required and the
  *                    WHOLE batch is refused (nothing signed) if it fails — fail-closed.
+ *                    Without a verified proof, policy HOLDs are NOT overridden: those txs
+ *                    come back `held`, and only AUTO_SIGN txs are signed.
  *        proof     - the hardware-2FA proof (Trezor / YubiKey) passed to `authorize`
  *        keyless   - a RemoteSigner; when present the key stays in the vault and each
  *                    signature is produced there. Required in PRIVATE.
@@ -257,6 +259,12 @@ export async function approveAll(client, signer, opts = {}) {
 
   // Hardware 2FA gate: verify a device proof bound to THIS exact batch before
   // signing anything. A failure refuses the whole batch — nothing is signed.
+  //
+  // Only a verified proof may override a policy HOLD. The operator string alone
+  // cannot: it is a claim any caller, env var or prompt-injected model can make,
+  // and with two agent owners on a 2-of-3 Safe an override backed by nothing more
+  // would let both agents meet threshold without the human.
+  let deviceVerified = false;
   if (authorize) {
     const hashes = pending.map(tx => tx.safeTxHash);
     try {
@@ -270,6 +278,7 @@ export async function approveAll(client, signer, opts = {}) {
         count: 0, summary: { refused: pending.length }, results: [],
       };
     }
+    deviceVerified = true;
   }
 
   const results = [];
@@ -297,6 +306,13 @@ export async function approveAll(client, signer, opts = {}) {
         // Hard reject is NOT overridden by an operator OK in the batch path.
         r.status = 'refused';
         r.reason = `policy REJECT: ${reasons.join('; ')}`;
+        results.push(r);
+        continue;
+      }
+
+      if (decision === DECISION.HOLD_HUMAN && !deviceVerified) {
+        r.status = 'held';
+        r.reason = 'policy HOLD_HUMAN: overriding a hold requires the owner\'s hardware 2FA proof for this batch';
         results.push(r);
         continue;
       }
