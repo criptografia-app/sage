@@ -358,6 +358,7 @@ node sage.js pending           # list pending Safe transactions
 node sage.js info              # Safe state summary (owners, threshold, nonce)
 node sage.js propose-batch '<json-array>'   # proposal agent: propose many txs (or via stdin)
 SAGE_OPERATOR=you@corp.com node sage.js approve-all   # signing agent: co-sign + execute pending
+SAGE_OPERATOR=you@corp.com SAGE_AUTHORIZATION='<2fa-proof-json>' node sage.js approve-all   # also override policy HOLDs (needs the owner's device proof)
 node setup.js                  # one-shot: keys → owners → 2-of-3 threshold
 ```
 
@@ -522,7 +523,7 @@ env overrides: `SAGE_INFERENCE_MODE`, `SAGE_INFERENCE_PROVIDER`,
 | AML violation | `REJECT` — the agent refuses and logs; not overridable in a bulk approval. |
 | Unauthenticated batch approval | `sage_approve_all` refuses without an operator identity; every approval (and any HOLD override) is logged against that operator. |
 | One agent compromised | Each agent runs in its own container with only its key; it can reach one signature, never the 2-of-3 threshold alone. |
-| Stolen session / spoofed "approve" instruction | Optional hardware 2FA (Trezor EIP-712 / YubiKey WebAuthn) bound to the exact batch, fresh (TTL) and one-shot (nonce burned) — `/signer` refuses without a valid proof. |
+| Stolen session / spoofed "approve" instruction / two agents compromised | A policy HOLD is only overridden with a verified hardware 2FA proof (Trezor EIP-712 / YubiKey WebAuthn) bound to the exact batch, fresh (TTL) and one-shot (nonce burned). An operator identity alone — from a caller, env var or prompt-injected model — leaves held txs unsigned. |
 | Funds sent to a wrong/typo'd recipient | Names/ENS are resolved and shown back; an ambiguous or unresolvable reference aborts the (whole) proposal rather than guessing. |
 
 ---
